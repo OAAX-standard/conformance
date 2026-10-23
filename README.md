@@ -37,8 +37,16 @@ Every test carries the spec clause it comes from and a level:
 ```bash
 scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
 pip install -e .
-oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--ignore-thread NAME] [--report r.json] [--junit r.xml]
+oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--ignore-thread NAME] [--out DIR]
 ```
+
+Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
+
+- `report.html`: a self-contained page (works offline) with the verdict, the expected behaviour and spec clause of each test, what was observed,
+  and every call the harness made. Print it to PDF from the browser: the print layout opens every section.
+- `report.json`: everything in the page, for tools and archiving (library sha256, platform, per-test result with evidence, full call transcripts).
+  Values given to `--init-config` are never stored, and neither is the library's directory.
+- `junit.xml`: for CI.
 
 Exit code: `0` no MUST check failed, `1` a MUST failed, `2` nothing failed but a MUST check could not run (for example `init` needs vendor
 keys: pass them with `--init-config`). Failures name the spec clause. The suite tests itself against a mock runtime with

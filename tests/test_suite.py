@@ -1,7 +1,12 @@
 """The suite tests itself: the clean mock runtime passes everything, and every check fails on its own fault."""
 import pytest
 
-from oaax_conformance import cli, report
+import json
+import re
+from pathlib import Path
+
+from oaax_conformance import cli, html_report, report
+from oaax_conformance.harness import STATUS_NAMES
 from oaax_conformance.registry import CHECKS
 from oaax_conformance.specdocs import load
 from oaax_conformance.suite import Context, run_suite
@@ -34,7 +39,7 @@ CASES = [
 
 def _run(build_dir, variant, init_config=("vendor_key=1",)):
     ctx = Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), settle_ms=500, timeout=30)
-    return {r.id: r for r in run_suite(ctx)[0]}
+    return {r.id: r for r in run_suite(ctx).results}
 
 
 def test_clean_mock_passes_everything(build_dir):
@@ -70,8 +75,8 @@ def test_exit_codes(build_dir, monkeypatch, tmp_path):
     base = ["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1"]
     assert cli.main(base) == 0
     monkeypatch.setenv("OAAX_MOCK_FAULT", "bad_version")
-    assert cli.main(base + ["--report", str(tmp_path / "r.json"), "--junit", str(tmp_path / "r.xml")]) == 1
-    assert (tmp_path / "r.json").stat().st_size > 0 and (tmp_path / "r.xml").stat().st_size > 0
+    assert cli.main(base + ["--out", str(tmp_path / "out")]) == 1
+    assert {p.name for p in (tmp_path / "out").iterdir()} == {"report.html", "report.json", "junit.xml"}
     monkeypatch.setenv("OAAX_MOCK_FAULT", "require_config")  # init needs a key and none is given: lifecycle MUSTs cannot run
     assert cli.main(base[:-2]) == 2
 
@@ -96,3 +101,44 @@ def test_console_is_a_table():
     assert lines[3].split() == ["RT-S-03", "Version", "string", "MUST", "FAIL"]  # backticks are dropped
     assert "RT-S-03 [MUST] FAIL: 'v1' is not a SemVer version" in "\n".join(lines)
     assert "\033" not in "\n".join(lines)  # no colour unless asked
+
+
+def test_status_names_match_the_pinned_header():
+    header = (Path(__file__).resolve().parents[1] / "spec" / "2.0" / "interface.h").read_text()
+    enum = header[header.index("typedef enum RuntimeStatus"):header.index("} RuntimeStatus")]
+    pairs = re.findall(r"RUNTIME_STATUS_(\w+) = (\d+)", enum)
+    assert [name for name, _ in sorted(pairs, key=lambda p: int(p[1]))] == STATUS_NAMES
+
+
+def test_report_document_and_html(build_dir, monkeypatch):
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "bad_version")
+    lib = str(build_dir / "libmock_runtime.so")
+    ctx = Context(lib, str(build_dir / "oaax-harness"), ["secret_key=hunter2"], settle_ms=500, timeout=30)
+    doc = report.build(run_suite(ctx), lib, "2.0", ["secret_key=hunter2"], [])
+    text = json.dumps(doc)
+    assert "hunter2" not in text and doc["options"]["init_config_keys"] == ["secret_key"]  # values are never stored
+    assert doc["verdict"]["exit_code"] == 1 and doc["library"]["runtime_name"] == "OAAX Mock Runtime"
+    assert "path" not in doc["library"] and str(build_dir) not in text  # no directories in a report that gets shared
+    assert doc["summary"]["counts"]["fail"] == 1 and doc["summary"]["by_level"]["MUST"]["fail"] == 1
+    calls = {o["call"]: o for o in doc["scenarios"]["static"]["observations"]}
+    assert "value" in calls["get_error_fresh"] and calls["get_error_fresh"]["value"] is None  # NULL is shown, not left blank
+    assert calls["version"]["value"] == "v1" and calls["preinit_load_models"]["status_name"] == "NOT_INITIALIZED"
+    failing = next(r for r in doc["results"] if r["outcome"] == "fail")
+    assert failing["id"] == "RT-S-03" and failing["scenarios"] == ["static"] and failing["pass_when"]
+    page = html_report.render(doc)
+    assert "RT-S-03" in page and "FAILED" in page and "NOT_INITIALIZED" in page
+
+
+def test_html_escapes_everything_it_shows():
+    doc = {"suite_version": "x", "spec_version": "2.0", "generated_at": "t", "platform": "p",
+           "verdict": {"exit_code": 1, "text": "FAILED", "note": "n"},
+           "library": {"name": "<img src=x onerror=alert(1)>", "sha256": "0", "runtime_name": "<script>", "runtime_version": None},
+           "options": {"init_config_keys": ["<k>"], "ignore_threads": []},
+           "summary": {"total": 1, "counts": {"pass": 0, "warn": 0, "fail": 1, "error": 0, "blocked": 0, "skipped": 0},
+                       "by_level": {"MUST": {}}, "draft_tests_not_run": 0},
+           "results": [{"id": "RT-X-01", "title": "<i>t</i>", "level": "MUST", "source": "<s>", "outcome": "fail", "message": "<script>alert(1)</script>",
+                       "pass_when": "<p>", "scenarios": ["static"]}],
+           "scenarios": {"static": {"returncode": 0, "signal": None, "timed_out": False, "duration_ms": 1,
+                                    "observations": [{"call": "<c>", "status": 0, "status_name": "SUCCESS", "value": "<script>", "extra": "<e>"}]}}}
+    page = html_report.render(doc)
+    assert "<script>alert" not in page and "<img src=x" not in page and "<c>" not in page

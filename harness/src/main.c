@@ -217,7 +217,7 @@ static int do_cleanup(const char *step) {
 
 static void do_string(const char *step, string_fn fn) {
   begin(step);
-  done(step, NO_STATUS, fn(), NULL);
+  done(step, NO_STATUS, fn(), "\"getter\":true");  // lets reports show NULL instead of an empty cell
 }
 
 // ---- scenarios ----------------------------------------------------------------------------------------------

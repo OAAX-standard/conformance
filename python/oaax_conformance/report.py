@@ -2,7 +2,8 @@
 import hashlib
 import json
 import platform
-from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -17,6 +18,8 @@ class Result:
     source: str
     outcome: str  # pass | fail | warn | blocked | error | skipped
     message: str = ""
+    pass_when: str = ""
+    scenarios: list = field(default_factory=list)  # scenarios the check read: its evidence
 
 
 def exit_code(results: list[Result]) -> int:
@@ -56,26 +59,64 @@ def console(results: list[Result], not_approved: int, color: bool = False, title
 
     counts = {o: sum(r.outcome == o for r in results) for o in COLORS}
     out += ["", ", ".join(f"{n} {o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)"]
-    verdict = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run"}[exit_code(results)]
-    out.append(f"Result: {verdict}. This run covers only the approved tests; it is not a full conformance claim.")
+    out.append(f"Result: {VERDICTS[exit_code(results)]}. {DISCLAIMER}")
     return "\n".join(out)
 
 
-def meta(lib: str, spec_version: str) -> dict:
+VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run"}
+DISCLAIMER = "This run covers only the approved tests; it is not a full conformance claim."
+
+
+def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str]) -> dict:
+    """The complete report: the JSON file is this document, the HTML page is rendered from it."""
+    results = suite.results
+    levels = sorted({r.level for r in results}, key=["MUST", "SHOULD", "PROPOSED"].index)
+    static = suite.runs.get("static")
+    identity = {}
+    for key, step in (("runtime_name", "name"), ("runtime_version", "version")):
+        try:
+            raw = static.raw(step) if static else None
+        except Exception:  # the static scenario may not have got that far; the report still has to be written
+            raw = None
+        identity[key] = raw.decode("utf-8", errors="replace") if raw else None
+    code = exit_code(results)
     return {
         "suite_version": __version__,
         "spec_version": spec_version,
-        "library": {"path": lib, "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest()},
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "verdict": {"exit_code": code, "text": VERDICTS[code], "note": DISCLAIMER},
+        "library": {"name": Path(lib).name,  # no directory: reports get shared
+                     "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest(), **identity},
         "platform": platform.platform(),
+        # values are not stored: vendor keys can hold licences or paths
+        "options": {"init_config_keys": [pair.split("=", 1)[0] for pair in init_config], "ignore_threads": ignore_threads},
+        "summary": {
+            "total": len(results),
+            "counts": {o: sum(r.outcome == o for r in results) for o in COLORS},
+            "by_level": {lv: {o: sum(r.outcome == o and r.level == lv for r in results) for o in COLORS} for lv in levels},
+            "draft_tests_not_run": suite.not_approved,
+        },
+        "results": [asdict(r) for r in results],
+        "scenarios": {
+            name: {
+                "returncode": run.returncode,
+                "signal": run.signal_name,
+                "timed_out": run.timed_out,
+                "duration_ms": run.duration_ms,
+                "observations": run.observations(),
+            }
+            for name, run in suite.runs.items()
+        },
     }
 
 
-def write_json(path: str, results: list[Result], info: dict) -> None:
-    Path(path).write_text(json.dumps({**info, "results": [asdict(r) for r in results]}, indent=2) + "\n")
+def write_json(path: str, doc: dict) -> None:
+    Path(path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
 
 
-def write_junit(path: str, results: list[Result], info: dict) -> None:
-    suite = ET.Element("testsuite", name=f"oaax-conformance {info['spec_version']}", tests=str(len(results)))
+def write_junit(path: str, doc: dict) -> None:
+    results = [Result(**{k: v for k, v in r.items()}) for r in doc["results"]]
+    suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)))
     for r in results:
         case = ET.SubElement(suite, "testcase", classname=r.level, name=f"{r.id} {r.title}")
         if r.outcome in ("fail", "error"):

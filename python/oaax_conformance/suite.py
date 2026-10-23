@@ -21,8 +21,11 @@ class Context:
     cycles: int = 50
     settle_ms: int = 3000
     _runs: dict = field(default_factory=dict)
+    used: list = field(default_factory=list)  # scenarios read by the check running now
 
     def run(self, scenario: str) -> Run:
+        if scenario not in self.used:
+            self.used.append(scenario)
         if scenario not in self._runs:
             extra = ["--cycles", str(self.cycles), "--settle-ms", str(self.settle_ms)]
             self._runs[scenario] = run_scenario(self.harness, scenario, self.lib, self.init_config, self.timeout, extra)
@@ -30,7 +33,8 @@ class Context:
 
 
 def run_check(spec: Spec, ctx: Context) -> Result:
-    result = Result(spec.id, spec.title, spec.level, spec.source, "pass")
+    result = Result(spec.id, spec.title, spec.level, spec.source, "pass", pass_when=spec.pass_when)
+    ctx.used = []
     fn = CHECKS.get(spec.id)
     if fn is None:
         result.outcome, result.message = "skipped", "approved but not implemented"
@@ -43,11 +47,20 @@ def run_check(spec: Spec, ctx: Context) -> Result:
         result.outcome, result.message = "blocked", str(e)
     except Exception:  # a bug in the check, not a verdict on the runtime
         result.outcome, result.message = "error", traceback.format_exc(limit=3).strip().splitlines()[-1]
+    result.scenarios = list(ctx.used)
     return result
 
 
-def run_suite(ctx: Context, only: list[str] | None = None) -> tuple[list[Result], int]:
+@dataclass
+class SuiteRun:
+    results: list[Result]
+    not_approved: int
+    runs: dict  # scenario name -> Run: everything the harness observed
+
+
+def run_suite(ctx: Context, only: list[str] | None = None) -> SuiteRun:
     specs = load()
     approved = [s for s in specs.values() if s.status == "approved" and (not only or s.id in only)]
-    return [run_check(s, ctx) for s in approved], len(specs) - len(approved)
+    results = [run_check(s, ctx) for s in approved]
+    return SuiteRun(results, len(specs) - len(approved), dict(ctx._runs))
 
