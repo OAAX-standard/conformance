@@ -82,3 +82,17 @@ def test_exit_code_function():
     assert report.exit_code([r("warn", "SHOULD"), r("blocked", "SHOULD")]) == 0
     assert report.exit_code([r("blocked")]) == 2
     assert report.exit_code([r("fail"), r("blocked")]) == 1
+
+
+def test_console_is_a_table():
+    results = [
+        report.Result("RT-S-01", "Exports", "MUST", "header", "pass"),
+        report.Result("RT-S-03", "Version `string`", "MUST", "header: SemVer", "fail", "'v1' is not a SemVer version"),
+        report.Result("RT-L-08", "Threads", "SHOULD", "derived", "blocked", "init failed"),
+    ]
+    lines = report.console(results, 0).splitlines()
+    assert lines[0].split() == ["ID", "Check", "Level", "Status"]
+    assert lines[2].split() == ["RT-S-01", "Exports", "MUST", "PASS"]
+    assert lines[3].split() == ["RT-S-03", "Version", "string", "MUST", "FAIL"]  # backticks are dropped
+    assert "RT-S-03 [MUST] FAIL: 'v1' is not a SemVer version" in "\n".join(lines)
+    assert "\033" not in "\n".join(lines)  # no colour unless asked

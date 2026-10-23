@@ -26,21 +26,39 @@ def exit_code(results: list[Result]) -> int:
     return 2 if any(r.outcome in ("blocked", "skipped") and r.level == "MUST" for r in results) else 0
 
 
-def console(results: list[Result], not_approved: int) -> str:
-    lines = []
-    for r in results:
-        head = f"{r.outcome.upper():8} {r.id}  {r.title}"
-        lines.append(head + (f"  [{r.level}]" if r.outcome != "pass" else ""))
-        if r.message:
-            lines.append(f"           {r.message}")
-        if r.outcome in ("fail", "warn"):
-            lines.append(f"           spec: {r.source}")
-    counts = {o: sum(r.outcome == o for r in results) for o in ("pass", "warn", "fail", "blocked", "error", "skipped")}
-    lines.append("")
-    lines.append(", ".join(f"{n} {o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)")
+COLORS = {"pass": "32", "warn": "33", "fail": "31", "error": "31", "blocked": "36", "skipped": "2"}
+MESSAGE_WIDTH = 160  # the JSON report keeps the full message
+
+
+def _paint(outcome: str, text: str, color: bool) -> str:
+    return f"\033[{COLORS[outcome]}m{text}\033[0m" if color else text
+
+
+def console(results: list[Result], not_approved: int, color: bool = False, title: str = "") -> str:
+    rows = [(r.id, r.title.replace("`", ""), r.level, r.outcome.upper()) for r in results]
+    header = ("ID", "Check", "Level", "Status")
+    widths = [max(len(row[i]) for row in [header, *rows]) for i in range(4)]
+    line = lambda cells, outcome=None: "  ".join(  # noqa: E731
+        (_paint(outcome, c.ljust(w), color) if outcome and i == 3 else c.ljust(w)) for i, (c, w) in enumerate(zip(cells, widths))
+    ).rstrip()
+
+    out = [title] if title else []
+    out += [line(header), "  ".join("-" * w for w in widths)]
+    out += [line(row, r.outcome) for row, r in zip(rows, results)]
+
+    details = [r for r in results if r.outcome != "pass"]
+    if details:
+        out += ["", "Details"]
+        for r in details:
+            out.append(f"  {r.id} [{r.level}] {r.outcome.upper()}: {r.message[:MESSAGE_WIDTH]}{'...' if len(r.message) > MESSAGE_WIDTH else ''}")
+            if r.outcome in ("fail", "warn"):
+                out.append(f"      spec: {r.source}")
+
+    counts = {o: sum(r.outcome == o for r in results) for o in COLORS}
+    out += ["", ", ".join(f"{n} {o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)"]
     verdict = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run"}[exit_code(results)]
-    lines.append(f"Result: {verdict}. This run covers only the approved tests; it is not a full conformance claim.")
-    return "\n".join(lines)
+    out.append(f"Result: {verdict}. This run covers only the approved tests; it is not a full conformance claim.")
+    return "\n".join(out)
 
 
 def meta(lib: str, spec_version: str) -> dict:

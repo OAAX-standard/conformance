@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -26,7 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     lib = str(Path(args.library).resolve())
     ctx = Context(lib, find_harness(args.harness), args.init_config, args.ignore_thread, args.timeout)
     results, not_approved = run_suite(ctx, args.only)
-    print(report.console(results, not_approved))
+    color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    print(report.console(results, not_approved, color, f"OAAX {SPEC_VERSION} runtime conformance: {Path(lib).name}\n"))
     info = report.meta(lib, SPEC_VERSION)
     if args.report:
         report.write_json(args.report, results, info)
