@@ -13,11 +13,21 @@ BUILD = Path(os.environ.get("OAAX_BUILD_DIR", ROOT / "build")).resolve()  # CI p
 def build_dir() -> Path:
     if not (BUILD / "oaax-harness").exists():
         subprocess.run([str(ROOT / "scripts" / "build.sh")], check=True, capture_output=True)
-    (BUILD / "mock.model").write_bytes(b"MOCKMODEL: the only kind of model the mock runtime loads")
     tensor = lambda name, shape: {"name": name, "native": {"dtype": "FLOAT", "shape": shape, "layout": "X" * len(shape)}}  # noqa: E731
-    (BUILD / "oaax-manifest.json").write_text(json.dumps({"model_file": "mock.model", "inputs": [tensor("x", [1, 4]), tensor("scale", [1])],
-                                                                    "outputs": [tensor("y", [1, 4]), tensor("sum", [1, 1])]}))
+    manifest = {"model_file": "mock.model", "inputs": [tensor("x", [1, 4]), tensor("scale", [1])], "outputs": [tensor("y", [1, 4]), tensor("sum", [1, 1])]}
+    _write_atomically(BUILD / "mock.model", b"MOCKMODEL: the only kind of model the mock runtime loads")
+    _write_atomically(BUILD / "oaax-manifest.json", json.dumps(manifest).encode())
     return BUILD
+
+
+def _write_atomically(path: Path, data: bytes) -> None:
+    """Every xdist worker runs this fixture while the others already run tests that read these files: a plain write_bytes truncates the file first and a
+    reader sees it empty or half written (this made a CI run find the model 'blocked'). Write a temporary file, then rename it over the target."""
+    if path.exists() and path.read_bytes() == data:
+        return
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 IMAGES = {  # image reference -> Dockerfile target
