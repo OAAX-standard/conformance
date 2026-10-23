@@ -15,7 +15,7 @@ Probed = reference CPU, Intel, Hailo and PythonBindings CPU 2.0 runtimes, run by
 | RT-S-06 | Info before `init` | `runtime_get_info()` is NULL | MUST | header: "Must return NULL if the runtime is not initialized" | 4/4 | draft |
 | RT-S-07 | No error yet | in a fresh process `runtime_get_error()` is NULL | MUST | header: "NULL if no error has occurred" | 4/4 | draft |
 | RT-S-08 | Cleanup before `init` | `runtime_cleanup()` returns SUCCESS, twice | MUST | header: "Must be idempotent (safe to call multiple times)" | 4/4 | draft |
-| RT-S-09 | Calls before `init` | `load_models`, `enqueue_input`, `retrieve_output(timeout 0)` neither crash nor return SUCCESS; the status is `NOT_INITIALIZED`; a rejected input is freed by the harness | SHOULD | header: caller must `init` first (behaviour otherwise unspecified); `NOT_INITIALIZED` exists for this | 4/4 return `NOT_INITIALIZED` (`load_models`, `enqueue_input`, `retrieve_output` as in the earlier probe) | draft |
+| RT-S-09 | Calls before `init` | `load_models`, `enqueue_input`, `retrieve_output(timeout 0)` neither crash nor return SUCCESS; the status is `NOT_INITIALIZED`; a rejected input is freed by the harness | SHOULD | header: caller must `init` first (behaviour otherwise unspecified); `NOT_INITIALIZED` exists for this | 3/3 probed (reference CPU, Intel, Hailo) return `NOT_INITIALIZED` for all three calls | draft |
 
 ## `RT-L`: lifecycle (`init` must succeed: needs the device, or the CPU runtime)
 
