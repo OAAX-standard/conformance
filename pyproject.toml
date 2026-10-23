@@ -8,11 +8,12 @@ version = "0.1.0"
 description = "OAAX conformance suite"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-dependencies = []
+dependencies = ["jsonschema"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-xdist"]
 onnx = ["onnx"]
+e2e = ["onnx", "onnxruntime", "numpy"]
 
 [project.scripts]
 oaax-conformance = "oaax_conformance.cli:main"

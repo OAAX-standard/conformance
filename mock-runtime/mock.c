@@ -257,12 +257,13 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     for (int i = 0; i < 4; i++) r->y[i] = x[i] * scale, r->sum += r->y[i];
     static int corrupt_count;
     if (fault("corrupt_every_7th") && ++corrupt_count % 7 == 0) r->y[0] += 1.0f;
+    if (fault("wrong_output")) r->y[0] += 1.0f;
     r->ready_ms = now_ms() + INFERENCE_MS;
   }
   pthread_mutex_lock(&lock);
   accepted_total++;
   int drop = (fault("concurrency_drop") && queued >= 2 && accepted_total % 3 == 0)  /* only under a backlog */ || (fault("flood_lost") && queued > 50);
-  if (r && !drop) {
+  if (r && !drop && !fault("drop_all")) {
     if (tail) tail->next = r;
     else head = r;
     tail = r;
@@ -292,7 +293,7 @@ static Tensors *make_output(const struct Request *r) {
   t->num_tensors = 2;
   t->tensors = calloc(2, sizeof *t->tensors);
   fill_descriptor(&t->tensors[0], "y", 2, 4, r->y);
-  fill_descriptor(&t->tensors[1], "sum", 1, 1, &r->sum);
+  fill_descriptor(&t->tensors[1], "sum", 2, 1, &r->sum);  // shape [1,1]
   if (fault("output_aliased")) {
     free(t->tensors[1].data);
     t->tensors[1].data = t->tensors[0].data;  // two descriptors, one buffer: the host would free it twice

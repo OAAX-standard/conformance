@@ -101,16 +101,21 @@ def _test(r: dict, scenarios: dict) -> str:
 
 
 def render(doc: dict) -> str:
-    code, lib, summary = doc["verdict"]["exit_code"], doc["library"], doc["summary"]
+    code, subject, summary = doc["verdict"]["exit_code"], doc["subject"], doc["summary"]
     verdict_class = {0: "pass", 1: "fail", 2: "blocked"}[code]
-    runtime = " ".join(filter(None, [lib.get("runtime_name"), lib.get("runtime_version")])) or "unknown runtime"
+    kind = subject["kind"]
     tiles = "".join(
         f'<div class="tile" style="border-color:var(--{o}-bg)"><b style="color:var(--{o})">{n}</b>{OUTCOMES[o]}</div>'
         for o, n in summary["counts"].items()
         if n
     )
     legend = "".join(f'<span class="small"><b>{lv}</b> <span class="muted">{escape(LEVEL_HELP[lv])}</span></span>' for lv in summary["by_level"])
+    leftovers = (f'<p class="small" style="color:var(--warn)">Temporary directories that could not be removed: {escape(", ".join(doc["leftovers"]))}</p>' if doc.get("leftovers") else "")
     options = doc["options"]
+    if kind == "toolchain":
+        options_line = f"docker args: {escape(' '.join(options['docker_args']) or 'none')} · runtime: {escape(options['runtime'] or 'none')}"
+    else:
+        options_line = f"init keys: {escape(', '.join(options['init_config_keys']) or 'none')} · ignored threads: {escape(', '.join(options['ignore_threads']) or 'none')}"
     scenarios = "".join(
         f'<details class="card" id="sc-{escape(n)}" style="margin-bottom:8px"><summary><b>{escape(n)}</b> <span class="muted small">exit {s["returncode"]}'
         f'{" (" + s["signal"] + ")" if s["signal"] else ""}{", timed out" if s["timed_out"] else ""}, {s["duration_ms"]} ms, {len(s["observations"])} calls</span></summary>'
@@ -119,16 +124,16 @@ def render(doc: dict) -> str:
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OAAX {escape(doc["spec_version"])} conformance: {escape(lib["name"])}</title><style>{CSS}</style></head>
+<title>OAAX {escape(doc["spec_version"])} {kind} conformance: {escape(subject["name"])}</title><style>{CSS}</style></head>
 <body><main>
-<div class="card"><div class="head"><div><h1>OAAX {escape(doc["spec_version"])} runtime conformance</h1>
-<div class="muted">{escape(runtime)} · <span class="mono">{escape(lib["name"])}</span></div></div>
+<div class="card"><div class="head"><div><h1>OAAX {escape(doc["spec_version"])} {kind} conformance</h1>
+<div class="muted">{escape(subject["detail"])} · <span class="mono">{escape(subject["name"])}</span></div></div>
 <span class="verdict" style="color:var(--{verdict_class});background:var(--{verdict_class}-bg)">{escape(doc["verdict"]["text"])}</span></div>
 <div class="tiles">{tiles}</div>
-<dl class="small"><dt>Library</dt><dd class="mono">{escape(lib["name"])}</dd><dt>SHA-256</dt><dd class="mono">{escape(lib["sha256"])}</dd>
+<dl class="small"><dt>{"Image" if kind == "toolchain" else "Library"}</dt><dd class="mono">{escape(subject["name"])}</dd><dt>{"Image id" if kind == "toolchain" else "SHA-256"}</dt><dd class="mono">{escape(subject["sha256"])}</dd>
 <dt>Platform</dt><dd>{escape(doc["platform"])}</dd><dt>Run</dt><dd>{escape(doc["generated_at"])} · suite {escape(doc["suite_version"])}</dd>
-<dt>Options</dt><dd>init keys: {escape(", ".join(options["init_config_keys"]) or "none")} · ignored threads: {escape(", ".join(options["ignore_threads"]) or "none")}</dd></dl>
-<p class="muted small" style="margin:14px 0 0">{escape(doc["verdict"]["note"])} {summary["draft_tests_not_run"]} draft test(s) were not run.</p></div>
+<dt>Options</dt><dd>{options_line}</dd></dl>
+<p class="muted small" style="margin:14px 0 0">{escape(doc["verdict"]["note"])} {summary["draft_tests_not_run"]} draft test(s) were not run.</p>{leftovers}</div>
 <h2>Tests</h2><div class="legend">{legend}</div>
 <div class="bar"><button data-f="all" aria-pressed="true">All ({summary["total"]})</button>
 <button data-f="problems" aria-pressed="false">Not passing ({summary["total"] - summary["counts"]["pass"]})</button></div>

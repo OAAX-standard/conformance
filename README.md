@@ -3,8 +3,8 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: early.** Batch 1 (20 runtime tests: static + lifecycle, Linux) runs. Toolchain and model tiers are specified in
-> [docs/tests/](docs/tests/) as they get approved, then implemented.
+> **Status: early.** Linux only. 61 runtime tests (static, lifecycle, model) and 25 toolchain / end-to-end tests run; the specifications
+> are in [docs/tests/](docs/tests/).
 
 ## Principles
 
@@ -53,7 +53,18 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
   Values given to `--init-config` are never stored, and neither is the library's directory.
 - `junit.xml`: for CI.
 
-Exit code: `0` no MUST check failed, `1` a MUST failed, `2` nothing failed but a MUST check could not run (for example `init` needs vendor
+### Toolchains
+
+```bash
+oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
+```
+
+Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
+image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
+with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
+(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`.
+
+Exit codes of both commands: `0` no MUST check failed, `1` a MUST failed, `2` nothing failed but a MUST check could not run (for example `init` needs vendor
 keys: pass them with `--init-config`). Failures name the spec clause. The suite tests itself against a mock runtime with
 injected faults: `python -m pytest`.
 

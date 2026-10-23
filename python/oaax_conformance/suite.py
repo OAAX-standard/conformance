@@ -30,6 +30,7 @@ class Context:
     producers: int = 4
     per_producer: int = 25
     model_cycles: int = 20
+    dump_dir: str | None = None  # the harness writes the outputs of the roundtrip scenario here (E2E tests)
     retrieve_timeout_ms: int = 10000  # how long a round trip waits for its output
     lost_after_ms: int = 3000  # a request not answered after this long counts as lost
     pause: float = 0.0  # seconds between scenarios, for hardware that needs to settle
@@ -65,6 +66,8 @@ class Context:
         args = ["--cycles", str(self.cycles), "--settle-ms", str(self.settle_ms), "--flood", str(self.flood), "--requests", str(self.requests),
                 "--producers", str(self.producers), "--per-producer", str(self.per_producer), "--model-cycles", str(self.model_cycles),
                 "--timeout-ms", str(self.retrieve_timeout_ms), "--lost-after-ms", str(self.lost_after_ms)]
+        if self.dump_dir:
+            args += ["--dump", self.dump_dir]
         if self.model:
             args += ["-m", self.model]
             try:
@@ -100,13 +103,18 @@ def run_check(spec: Spec, ctx: Context) -> Result:
 class SuiteRun:
     results: list[Result]
     not_approved: int
-    runs: dict  # scenario name -> Run: everything the harness observed
+    runs: dict  # scenario / conversion name -> what was observed (anything with observations())
+    leftovers: list = field(default_factory=list)  # temporary directories that could not be removed
 
 
-def run_suite(ctx: Context, only: list[str] | None = None) -> SuiteRun:
-    specs = load()
+def run_suite(ctx, only: list[str] | None = None, prefixes: tuple = ("RT-",)) -> SuiteRun:
+    """Run the approved checks whose id starts with one of `prefixes` (RT- for a runtime, TC- and E2E- for a toolchain)."""
+    specs = {i: s for i, s in load().items() if i.startswith(prefixes)}
     approved = [s for s in specs.values() if s.status == "approved"]
     selected = [s for s in approved if not only or s.id in only]
     results = [run_check(s, ctx) for s in selected]
-    return SuiteRun(results, len(specs) - len(approved), dict(ctx._runs))
-
+    runs = {k: v for k, v in ctx._runs.items() if not isinstance(v, (list, Context))}
+    for key, value in ctx._runs.items():
+        if isinstance(value, list):  # conversions started together
+            runs.update({f"{key}-{i}": run for i, run in enumerate(value)})
+    return SuiteRun(results, len(specs) - len(approved), runs)

@@ -75,29 +75,18 @@ def redact(doc: dict, private_paths: list[str]) -> dict:
     return json.loads(text)
 
 
-def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str], private_paths: list[str] = ()) -> dict:
-    """The complete report: the JSON file is this document, the HTML page is rendered from it."""
+def _document(suite, spec_version: str, subject: dict, options: dict, private_paths: list[str]) -> dict:
     results = suite.results
     levels = sorted({r.level for r in results}, key=["MUST", "SHOULD", "PROPOSED"].index)
-    static = suite.runs.get("static")
-    identity = {}
-    for key, step in (("runtime_name", "name"), ("runtime_version", "version")):
-        try:
-            raw = static.raw(step) if static else None
-        except Exception:  # the static scenario may not have got that far; the report still has to be written
-            raw = None
-        identity[key] = raw.decode("utf-8", errors="replace") if raw else None
     code = exit_code(results)
     doc = {
         "suite_version": __version__,
         "spec_version": spec_version,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "verdict": {"exit_code": code, "text": VERDICTS[code], "note": DISCLAIMER},
-        "library": {"name": Path(lib).name,  # no directory: reports get shared
-                     "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest(), **identity},
+        "subject": subject,
         "platform": platform.platform(),
-        # values are not stored: vendor keys can hold licences or paths
-        "options": {"init_config_keys": [pair.split("=", 1)[0] for pair in init_config], "ignore_threads": ignore_threads},
+        "options": options,
         "summary": {
             "total": len(results),
             "counts": {o: sum(r.outcome == o for r in results) for o in COLORS},
@@ -116,7 +105,34 @@ def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_thr
             for name, run in suite.runs.items()
         },
     }
-    return redact(doc, [str(Path(lib).parent), *private_paths, str(Path.home())])
+    if suite.leftovers:
+        doc["leftovers"] = suite.leftovers
+    return redact(doc, [*private_paths, str(Path.home())])
+
+
+def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str], private_paths: list[str] = ()) -> dict:
+    """The complete report of a runtime run: the JSON file is this document, the HTML page is rendered from it."""
+    static = suite.runs.get("static")
+    identity = {}
+    for key, step in (("runtime_name", "name"), ("runtime_version", "version")):
+        try:
+            raw = static.raw(step) if static else None
+        except Exception:  # the static scenario may not have got that far; the report still has to be written
+            raw = None
+        identity[key] = raw.decode("utf-8", errors="replace") if raw else None
+    detail = " ".join(filter(None, [identity["runtime_name"], identity["runtime_version"]])) or "unknown runtime"
+    subject = {"kind": "runtime", "name": Path(lib).name, "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest(), "detail": detail, **identity}
+    # values are not stored: vendor keys can hold licences or paths
+    options = {"init_config_keys": [pair.split("=", 1)[0] for pair in init_config], "ignore_threads": ignore_threads}
+    return _document(suite, spec_version, subject, options, [str(Path(lib).parent), *private_paths])
+
+
+def build_toolchain(suite, image: str, info: dict, spec_version: str, docker_args: list[str], runtime: str | None, private_paths: list[str] = ()) -> dict:
+    """The complete report of a toolchain run."""
+    subject = {"kind": "toolchain", "name": image, "sha256": info["id"].removeprefix("sha256:"),
+               "detail": f"{info.get('os') or '?'}/{info.get('architecture') or '?'}"}
+    options = {"docker_args": docker_args, "runtime": Path(runtime).name if runtime else None}
+    return _document(suite, spec_version, subject, options, list(private_paths))
 
 
 def write_json(path: str, doc: dict) -> None:
