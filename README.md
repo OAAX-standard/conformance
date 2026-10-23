@@ -11,13 +11,14 @@ Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker
   clause and says what to fix.
 - **Dead simple for users**: a pass means "this runtime/toolchain can be swapped for another one without code changes".
 - **Strict on the raw API**: the suite talks to the runtime's C API directly, never through a tolerant wrapper.
-- **Runs anywhere**: the first tier needs no accelerator and no model.
+- **Runs anywhere**: the static tier needs no accelerator, no model and no `init`.
 
 ## Tiers
 
 | Tier | Needs | Checks |
 | ---- | ----- | ------ |
-| `runtime/abi` | the `.so` / `.dll` only | exported symbols, getters, lifecycle and status codes, ownership, no process exit, clean unload |
+| `runtime/static` | the `.so` / `.dll` only | exported symbols, getters, calls before `init` |
+| `runtime/lifecycle` | a working `init` (device, or the CPU runtime) | `init`/`cleanup` rules, error text, cycles, threads, unload, memory, exit |
 | `runtime/model` | a model the runtime can load (+ the device) | enqueue/retrieve, id echo, multi-model routing, timeouts, concurrency, input validation, leaks |
 | `toolchain` | the Docker image | arguments, exit codes, log and manifest, no root / no network, output integrity, hostile input |
 | `e2e` | both | convert, load, run, compare with the ONNX reference within the declared precision |
@@ -38,6 +39,8 @@ oaax-conformance toolchain oaax-<vendor>-toolchain:tag
 ```
 
 The report is a JSON file (suite version, spec version, library sha256, platform, results) plus a JUnit XML for CI.
+
+See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 
 ## Contributing
 
