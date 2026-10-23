@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- **C harness** (C11, CMake, builds with MSVC): the only code that touches a runtime. It runs fixed *scenarios* and prints one
+- **C harness** (C11, CMake; Linux only for now: it uses `dlfcn` and `/proc`): the only code that touches a runtime. It runs fixed *scenarios* and prints one
   JSON line per call (status, error text, timing, thread count, RSS), flushed after every call so a crash is attributable.
 - **Python orchestrator**: runs each scenario in its own process with a timeout (a crashing runtime is a failure, not a dead
   suite), holds **all assertions**, spec clauses and levels, runs the toolchain tier (Docker), compares with ONNX, writes the
@@ -12,7 +12,7 @@
 - **`spec/<version>/`**: the pinned `interface.h` per spec version; tests cite it, vendor copies cannot drift.
 
 ```
-harness/  python/oaax_conformance/  spec/2.0/  models/  fixtures/  mock-runtime/  tests/  docs/
+harness/  python/oaax_conformance/  spec/2.0/  mock-runtime/  mock-toolchain/  tests/  docs/
 ```
 
 ## Distribution

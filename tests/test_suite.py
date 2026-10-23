@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 
+import helpers
 from oaax_conformance import cli, html_report, report
 from oaax_conformance.harness import STATUS_NAMES
 from oaax_conformance.registry import CHECKS
@@ -40,6 +41,7 @@ CASES = [
     ("stale_error", "mock_runtime", "RT-L-15"),
     ("null_ptr_ignored", "mock_runtime", "RT-L-16"),
     ("null_ptr_crash", "mock_runtime", "RT-L-16"),
+    ("cleanup_twice_fails", "mock_runtime", "RT-L-17"),
     ("load_twice_ok", "mock_runtime", "RT-M-01"),
     ("load_sticky_failure", "mock_runtime", "RT-M-02"),
     ("no_memory_load", "mock_runtime", "RT-M-03"),
@@ -80,9 +82,7 @@ CASES = [
 
 
 def _context(build_dir, variant, init_config=("vendor_key=1",), model=True):
-    """Small load sizes: the self-tests run every fault, and the mock needs 5 ms per request."""
-    return Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model") if model else None,
-                   settle_ms=500, timeout=60, cycles=5, flood=100, requests=60, producers=3, per_producer=10, model_cycles=3, lost_after_ms=400, retrieve_timeout_ms=1500)
+    return helpers.context(build_dir, variant, init_config, model)
 
 
 def _run(build_dir, variant, init_config=("vendor_key=1",)):
@@ -208,11 +208,18 @@ def test_html_escapes_everything_it_shows():
     assert "<script>alert" not in page and "<img src=x" not in page and "<c>" not in page
 
 
-def test_report_redacts_directories_runtimes_echo_in_messages():
-    doc = {"results": [{"message": "Failed to extract model archive: /home/someone/models/model.onnx"}], "subject": {"name": "x"}}
-    clean = report.redact(doc, ["/home/someone/models"])
-    assert clean["results"][0]["message"] == "Failed to extract model archive: model.onnx"
-    assert report.redact(doc, ["/"])["results"][0]["message"] == doc["results"][0]["message"]  # never redact the root
+def test_report_scrubs_directories_secrets_and_control_characters():
+    doc = {"results": [{"message": "Failed to extract model archive: /home/someone/models/model.onnx; license=SECRET123 \x01\x1b[31m"}], "subject": {"name": "x"}}
+    clean = report.scrub(doc, ["/home/someone/models"], ["SECRET123"])
+    assert clean["results"][0]["message"] == "Failed to extract model archive: model.onnx; license=*** \\x01\\x1b[31m"
+    assert report.scrub(doc, ["/"], [])["results"][0]["message"].startswith("Failed to extract model archive: /home/someone")  # never scrub the root
+    unicode_doc = {"m": "/home/josé/models/m.bin and /home/josé/models"}  # the document is dumped with ensure_ascii=False: paths are matched as text
+    assert report.scrub(unicode_doc, ["/home/josé/models"], [])["m"] == "m.bin and <dir>"
+
+
+def test_docker_arguments_are_masked_and_their_values_are_secrets():
+    assert report.mask_docker_args(["-e", "TOKEN=abc123", "--gpus=all", "-eX=yy", "--env=K=V"]) == ["-e", "TOKEN=***", "--gpus=all", "-eX=***", "--env=K=***"]
+    assert report.secret_values(["license=SECRET123", "a=b"], ["-e", "TOKEN=abc123"]) == ["SECRET123", "abc123"]  # one-character values are not worth shredding
 
 
 def test_only_does_not_count_unselected_tests_as_drafts(build_dir):
