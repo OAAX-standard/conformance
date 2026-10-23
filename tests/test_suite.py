@@ -41,12 +41,52 @@ CASES = [
     ("null_ptr_ignored", "mock_runtime", "RT-L-16"),
     ("null_ptr_crash", "mock_runtime", "RT-L-16"),
     ("load_twice_ok", "mock_runtime", "RT-M-01"),
+    ("load_sticky_failure", "mock_runtime", "RT-M-02"),
+    ("no_memory_load", "mock_runtime", "RT-M-03"),
+    ("retain_buffer", "mock_runtime", "RT-M-04"),
+    ("wrong_model_id", "mock_runtime", "RT-M-05"),
+    ("accept_bad_id", "mock_runtime", "RT-M-06"),
+    ("bad_id_generic", "mock_runtime", "RT-M-07"),
+    ("no_id_echo", "mock_runtime", "RT-M-08"),
+    ("output_null_name", "mock_runtime", "RT-M-09"),
+    ("output_aliased", "mock_runtime", "RT-M-10"),
+    ("bad_data_size", "mock_runtime", "RT-M-11"),
+    ("rename_output", "mock_runtime", "RT-M-12"),
+    ("retrieve0_blocks", "mock_runtime", "RT-M-13"),
+    ("retrieve_timeout_long", "mock_runtime", "RT-M-14"),
+    ("retrieve_returns_early", "mock_runtime", "RT-M-15"),
+    ("negative_no_wait", "mock_runtime", "RT-M-16"),
+    ("enqueue_blocks", "mock_runtime", "RT-M-17"),
+    ("null_tensors_crash", "mock_runtime", "RT-M-18"),
+    ("accept_empty", "mock_runtime", "RT-M-19"),
+    ("accept_missing", "mock_runtime", "RT-M-20"),
+    ("accept_wrong_dtype", "mock_runtime", "RT-M-21"),
+    ("type_code_generic", "mock_runtime", "RT-M-22"),
+    ("accept_wrong_shape", "mock_runtime", "RT-M-23"),
+    ("shape_code_generic", "mock_runtime", "RT-M-24"),
+    ("accept_bad_size", "mock_runtime", "RT-M-25"),
+    ("accept_unknown_name", "mock_runtime", "RT-M-26"),
+    ("free_rejected", "mock_runtime", "RT-M-27"),
+    ("break_after_reject", "mock_runtime", "RT-M-28"),
+    ("concurrency_drop", "mock_runtime", "RT-M-29"),
+    ("corrupt_every_7th", "mock_runtime", "RT-M-30"),
+    ("cleanup_fails_inflight", "mock_runtime", "RT-M-31"),
+    ("no_wakeup", "mock_runtime", "RT-M-32"),
+    ("flood_lost", "mock_runtime", "RT-M-33"),
+    ("info_stale", "mock_runtime", "RT-M-34"),
+    ("leak_per_load", "mock_runtime", "RT-M-35"),
+    ("leak_per_request", "mock_runtime", "RT-M-36"),
 ]
 
 
+def _context(build_dir, variant, init_config=("vendor_key=1",), model=True):
+    """Small load sizes: the self-tests run every fault, and the mock needs 5 ms per request."""
+    return Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model") if model else None,
+                   settle_ms=500, timeout=60, cycles=5, flood=100, requests=60, producers=3, per_producer=10, model_cycles=3, lost_after_ms=400, retrieve_timeout_ms=1500)
+
+
 def _run(build_dir, variant, init_config=("vendor_key=1",)):
-    ctx = Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model"), settle_ms=500, timeout=30)
-    return {r.id: r for r in run_suite(ctx).results}
+    return {r.id: r for r in run_suite(_context(build_dir, variant, init_config)).results}
 
 
 def test_clean_mock_passes_everything(build_dir):
@@ -79,27 +119,30 @@ def test_every_check_has_a_fault_case():
 
 def test_exit_codes(build_dir, monkeypatch, tmp_path):
     lib = str(build_dir / "libmock_runtime.so")
-    base = ["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1"]
+    base = ["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--hardware-safe", "--pause", "0",
+            "--init-config", "vendor_key=1"]
     assert cli.main(base) == 0
     monkeypatch.setenv("OAAX_MOCK_FAULT", "bad_version")
     assert cli.main(base + ["--out", str(tmp_path / "out")]) == 1
     assert {p.name for p in (tmp_path / "out").iterdir()} == {"report.html", "report.json", "junit.xml"}
     monkeypatch.setenv("OAAX_MOCK_FAULT", "require_config")  # init needs a key and none is given: lifecycle MUSTs cannot run
-    assert cli.main(base[:-2]) == 2
+    assert cli.main(base[:-2]) == 2  # without the vendor key init fails: the MUST checks cannot run
 
 
 def test_model_tests_are_blocked_without_a_model(build_dir):
-    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], settle_ms=500, timeout=30)
-    result = {r.id: r for r in run_suite(ctx).results}["RT-M-01"]
-    assert result.outcome == "blocked" and "--model" in result.message
+    result = {r.id: r for r in run_suite(_context(build_dir, "mock_runtime", model=False)).results}
+    assert result["RT-M-01"].outcome == "blocked" and "--model" in result["RT-M-01"].message
+    assert {r.outcome for i, r in result.items() if i.startswith("RT-M")} == {"blocked"}
 
 
 def test_a_model_the_runtime_cannot_load_blocks_instead_of_failing(build_dir, tmp_path):
     bad = tmp_path / "bad.model"
     bad.write_bytes(b"not a mock model")
-    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], str(bad), settle_ms=500, timeout=30)
-    result = {r.id: r for r in run_suite(ctx).results}["RT-M-01"]
-    assert result.outcome == "blocked" and "could not load the model" in result.message
+    ctx = _context(build_dir, "mock_runtime")
+    ctx.model = str(bad)
+    results = {r.id: r for r in run_suite(ctx).results}
+    assert results["RT-M-01"].outcome == "blocked" and "could not load the model" in results["RT-M-01"].message
+    assert results["RT-M-08"].outcome == "blocked"  # no manifest next to this model: inputs unknown
 
 
 def test_exit_code_function():

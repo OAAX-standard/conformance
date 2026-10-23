@@ -37,10 +37,13 @@ Every test carries the spec clause it comes from and a level:
 ```bash
 scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
 pip install -e .
-oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--ignore-thread NAME] [--out DIR]
+oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--input NAME:DTYPE:DIMS]... [--hardware-safe] [--ignore-thread NAME] [--out DIR]
 ```
 
-`--model FILE` is a model the runtime can load; it enables the tests that need one (they are `BLOCKED` without it).
+`--model FILE` is a model the runtime can load; it enables the tests that need one (they are `BLOCKED` without it). To send requests the suite
+must know what the model takes: it reads an `oaax-manifest.json` next to the model, or the `.onnx` file itself (`pip install oaax-conformance[onnx]`),
+or you give each input with `--input NAME:DTYPE:DIMS`. `--hardware-safe` is for shared or fragile devices: few cycles, small floods and a pause
+between scenarios.
 
 Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
 
