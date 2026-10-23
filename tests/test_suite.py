@@ -34,6 +34,12 @@ CASES = [
     ("pin_library", "mock_runtime", "RT-L-09"),
     ("leak_memory", "mock_runtime", "RT-L-10"),
     ("crash_at_exit", "mock_runtime", "RT-L-11"),
+    ("postcleanup_success", "mock_runtime", "RT-L-12"),
+    ("load_error_generic", "mock_runtime", "RT-L-13"),
+    ("load_error_generic", "mock_runtime", "RT-L-14"),
+    ("stale_error", "mock_runtime", "RT-L-15"),
+    ("null_ptr_ignored", "mock_runtime", "RT-L-16"),
+    ("null_ptr_crash", "mock_runtime", "RT-L-16"),
 ]
 
 

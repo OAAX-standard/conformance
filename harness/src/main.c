@@ -330,12 +330,68 @@ static int scenario_exit_without_cleanup(void) {
   exit(0);
 }
 
+// Failing calls and what the runtime says about them (needs init, no model): errors after a later success, bad model
+// files, calls after cleanup.
+static int scenario_errors(void) {
+  ModelConfig preinit_model = {.file_path = "/nonexistent/oaax-conformance.model"};
+  begin("preinit_load_models");  // leaves an error message behind: the next successful call must not keep it
+  done("preinit_load_models", rt.load_models(1, &preinit_model), NULL, NULL);
+  do_init("init", opt.config, 1);
+  do_string("get_error_after_init", rt.get_error);
+
+  ModelConfig missing = {.file_path = "/nonexistent/oaax-conformance.model"};
+  begin("load_missing_file");
+  done("load_missing_file", rt.load_models(1, &missing), NULL, NULL);
+
+  char corrupt_path[] = "/tmp/oaax-corrupt-XXXXXX";
+  int fd = mkstemp(corrupt_path);
+  if (fd >= 0) {
+    const char junk[] = "this is not a model: oaax conformance suite garbage bytes";
+    if (write(fd, junk, sizeof junk) < 0) perror("write");
+    close(fd);
+  }
+  ModelConfig corrupt = {.file_path = corrupt_path};
+  begin("load_corrupt_file");
+  done("load_corrupt_file", rt.load_models(1, &corrupt), NULL, NULL);
+  unlink(corrupt_path);
+
+  do_cleanup("cleanup");
+  begin("post_cleanup_load_models");
+  done("post_cleanup_load_models", rt.load_models(1, &missing), NULL, NULL);
+  Tensors *input = make_input();
+  begin("post_cleanup_enqueue_input");
+  RuntimeStatus s = rt.enqueue_input(0, input);
+  done("post_cleanup_enqueue_input", s, NULL, NULL);
+  if (s != RUNTIME_STATUS_SUCCESS) free_tensors(input);
+  int model_id = -1;
+  Tensors *output = NULL;
+  begin("post_cleanup_retrieve_output");
+  done("post_cleanup_retrieve_output", rt.retrieve_output(&model_id, &output, 0), NULL, NULL);
+  free_tensors(output);
+  return 0;
+}
+
+// Its own scenario: NULL pointers are the likeliest way to crash a runtime, and a crash ends the scenario.
+static int scenario_null_pointers(void) {
+  do_init("init", opt.config, 1);
+  int model_id = -1;
+  Tensors *output = NULL;
+  begin("retrieve_null_model_id");
+  done("retrieve_null_model_id", rt.retrieve_output(NULL, &output, 0), NULL, NULL);
+  begin("retrieve_null_output");
+  done("retrieve_null_output", rt.retrieve_output(&model_id, NULL, 0), NULL, NULL);
+  do_cleanup("cleanup");
+  return 0;
+}
+
 static const struct { const char *name; int (*run)(void); } SCENARIOS[] = {
     {"static", scenario_static},
     {"lifecycle", scenario_lifecycle},
     {"cycles", scenario_cycles},
     {"unload", scenario_unload},
     {"exit-without-cleanup", scenario_exit_without_cleanup},
+    {"errors", scenario_errors},
+    {"null-pointers", scenario_null_pointers},
 };
 
 // ---- main ---------------------------------------------------------------------------------------------------

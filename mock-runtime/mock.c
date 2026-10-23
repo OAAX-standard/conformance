@@ -36,9 +36,9 @@ static void *idle_thread(void *arg) {
   return NULL;
 }
 
-// A pre-init call: NOT_INITIALIZED, unless a fault says otherwise.
+// A call while not initialized (before init, or after cleanup): NOT_INITIALIZED, unless a fault says otherwise.
 static RuntimeStatus not_initialized(void) {
-  if (fault("preinit_success")) return RUNTIME_STATUS_SUCCESS;
+  if (fault("preinit_success") || (cleaned_once && fault("postcleanup_success"))) return RUNTIME_STATUS_SUCCESS;
   if (fault("crash_preinit")) *(volatile int *)0 = 1;
   return fail(RUNTIME_STATUS_NOT_INITIALIZED, "runtime not initialized");
 }
@@ -65,12 +65,19 @@ EXPORT RuntimeStatus runtime_init(Config config) {
     if (dladdr((void *)runtime_init, &info)) dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
   }
   initialized = 1;
+  if (!fault("stale_error")) has_error = 0;  // a successful call leaves no error behind
   return RUNTIME_STATUS_SUCCESS;
 }
 
+// The mock has no models: a missing file is FILE_NOT_FOUND, any other file is INVALID_MODEL.
 EXPORT RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs) {
-  (void)num_models, (void)model_configs;
-  return initialized ? fail(RUNTIME_STATUS_ERROR, "the mock has no models") : not_initialized();
+  if (!initialized) return not_initialized();
+  if (num_models < 1 || !model_configs || !model_configs[0].file_path) return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "no model given");
+  if (fault("load_error_generic")) return fail(RUNTIME_STATUS_ERROR, "failed to load the model");
+  FILE *f = fopen(model_configs[0].file_path, "rb");
+  if (!f) return fail(RUNTIME_STATUS_FILE_NOT_FOUND, "model file not found");
+  fclose(f);
+  return fail(RUNTIME_STATUS_INVALID_MODEL, "not a model");
 }
 
 EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
@@ -79,7 +86,12 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors)
 }
 
 EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_tensors, int timeout_ms) {
-  (void)model_id, (void)output_tensors, (void)timeout_ms;
+  (void)timeout_ms;
+  if (fault("null_ptr_crash")) *output_tensors = NULL;  // dereferences the pointer the caller left NULL
+  if (!model_id || !output_tensors) {
+    if (fault("null_ptr_ignored")) return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
+    return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "model_id and output_tensors must not be NULL");
+  }
   return initialized ? RUNTIME_STATUS_NO_OUTPUT_AVAILABLE : not_initialized();
 }
 

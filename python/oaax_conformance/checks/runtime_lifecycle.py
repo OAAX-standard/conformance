@@ -2,6 +2,7 @@
 import json
 from collections import Counter
 
+from ..harness import STATUS_NAMES
 from ..registry import Blocked, Fail, check
 
 SUCCESS, ALREADY_INITIALIZED = 0, 3
@@ -10,6 +11,12 @@ MAX_RSS_GROWTH = 5 * 1024 * 1024
 
 def _status(run, step: str) -> int:
     return run.step(step)["status"]
+
+
+def _expect_status(run, step: str, expected: int, what: str) -> None:
+    status = run.step(step)["status"]
+    if status != expected:
+        raise Fail(f"{what} returned {STATUS_NAMES[status]} ({status}), expected {STATUS_NAMES[expected]} ({expected})")
 
 
 @check("RT-L-01")
@@ -104,3 +111,39 @@ def exit_without_cleanup(ctx):
         raise Fail("the process hung at exit")
     if run.returncode != 0:
         raise Fail(f"the process exited abnormally ({run.signal_name or 'exit code ' + str(run.returncode)}) without cleanup")
+
+
+NOT_INITIALIZED, INVALID_ARGUMENT, INVALID_MODEL, FILE_NOT_FOUND = 2, 5, 6, 7
+
+
+@check("RT-L-12")
+def calls_after_cleanup(ctx):
+    run = ctx.run("errors")
+    for call in ("load_models", "enqueue_input", "retrieve_output"):
+        _expect_status(run, f"post_cleanup_{call}", NOT_INITIALIZED, f"{call} after cleanup")
+
+
+@check("RT-L-13")
+def missing_model_file(ctx):
+    _expect_status(ctx.run("errors"), "load_missing_file", FILE_NOT_FOUND, "load_models with a file that does not exist")
+
+
+@check("RT-L-14")
+def corrupt_model_file(ctx):
+    _expect_status(ctx.run("errors"), "load_corrupt_file", INVALID_MODEL, "load_models with a file that is not a model")
+
+
+@check("RT-L-15")
+def error_cleared_by_success(ctx):
+    run = ctx.run("errors")
+    if _status(run, "preinit_load_models") == SUCCESS:
+        raise Blocked("the call before init did not fail, so no error was set (see RT-S-09)")
+    if run.raw("get_error_after_init") is not None:
+        raise Fail("runtime_get_error() still returns the message of an earlier failed call after a successful init")
+
+
+@check("RT-L-16")
+def null_output_pointers(ctx):
+    run = ctx.run("null-pointers")
+    for step, what in (("retrieve_null_model_id", "retrieve_output with model_id NULL"), ("retrieve_null_output", "retrieve_output with output_tensors NULL")):
+        _expect_status(run, step, INVALID_ARGUMENT, what)

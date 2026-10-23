@@ -47,11 +47,14 @@ Config for `init` is empty unless the user passes `--init-config key=value` (ven
 | RT-L-10 | Memory | RSS after 50 cycles grows by less than 5 MB over RSS after the first cycle | SHOULD | derived, same as RT-L-08 | not probed | approved |
 | RT-L-11 | Exit without cleanup | after `init`, the process exits with code 0 within 10 s (no crash or hang in static destructors) | PROPOSED | none: robustness rule | not probed | approved |
 
+| RT-L-12 | Calls after cleanup | `load_models`, `enqueue_input` and `retrieve_output` after `cleanup` return `NOT_INITIALIZED` (no crash) | PROPOSED | none: the header says the caller "must not call any other runtime functions"; 2.1 should give the case a defined result | 4/4 | approved |
+| RT-L-13 | Missing model file | `load_models` with a path that does not exist returns `FILE_NOT_FOUND` | PROPOSED | none: the status exists in the header but the text never says when to return it | 0/4 (all return `ERROR`) | approved |
+| RT-L-14 | Corrupt model file | `load_models` with a file that is not a model returns `INVALID_MODEL` | PROPOSED | none: same as RT-L-13 | 0/4 (all return `ERROR`) | approved |
+| RT-L-15 | Error cleared | after a failed call, a successful `init` leaves `get_error()` NULL | PROPOSED | none: header says "NULL if no error has occurred" but not when a message goes away | 1/4 (only Hailo clears it) | approved |
+| RT-L-16 | NULL output pointers | `retrieve_output` with `model_id` NULL, and with `output_tensors` NULL, returns `INVALID_ARGUMENT` (no crash) | PROPOSED | none: header: caller "must provide non-NULL pointers"; the result for a violation is not defined | 3/4 (Intel checks state first: `MODEL_NOT_LOADED`) | approved |
+
 ## Deliberately not tested in 2.0
 
-The spec text is silent or declares the behaviour undefined, so a test would be guessing. Each is a candidate clarification for 2.1.
-
-- Any call after `cleanup` except `init`, getters and `cleanup` (header: the caller "must not call any other runtime functions").
-- `load_models` called twice in one session; exact status for a missing, corrupt or foreign model file (runtimes return `ERROR`, never `FILE_NOT_FOUND` / `INVALID_MODEL`).
-- `get_error` after a later success (some runtimes keep the stale message).
-- NULL pointers to `retrieve_output`.
+- `load_models` called twice in one session: needs a loadable model, so it belongs to the model tier (batch 2).
+- A "foreign" model file (valid for another runtime): cannot be tested generically; an ONNX file is valid for ONNX-based runtimes.
+- `get_error` pointer lifetime across threads: needs the concurrency scenarios of the model tier.
