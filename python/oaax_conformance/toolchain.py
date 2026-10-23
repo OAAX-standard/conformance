@@ -1,0 +1,276 @@
+"""Runs a toolchain image on temporary directories and records what it did.
+
+Every conversion gets its own workspace: `in/` (the input, writable by any uid) and `out/` (the output mount, writable by any uid).
+Directories owned by another uid are never created by the suite itself: a test that runs the container as an arbitrary uid writes into
+the existing `out/`, so every file the container creates sits in a directory the invoking user owns and can delete."""
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+import uuid
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ARBITRARY_UID = "12345:12345"
+LOG_NAMES = ("conversion-log.json", "logs.json")
+MANIFEST = "oaax-manifest.json"
+TAIL = 3000  # bytes of console output kept per stream
+
+
+def docker_available() -> bool:
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def inspect(image: str) -> dict:
+    """The parts of `docker inspect` the checks use."""
+    out = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True)
+    if out.returncode:
+        raise FileNotFoundError(f"image {image!r} not found: {out.stderr.strip()}")
+    info = json.loads(out.stdout)[0]
+    config = info.get("Config") or {}
+    return {"id": info["Id"], "user": config.get("User") or "", "entrypoint": config.get("Entrypoint") or [], "cmd": config.get("Cmd") or [],
+            "architecture": info.get("Architecture"), "os": info.get("Os")}
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def tree(root: Path) -> dict[str, dict]:
+    """Every file and directory under root: relative path -> size, mode, sha256 (files)."""
+    entries = {}
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": path.is_dir(), "uid": st.st_uid}
+        if path.is_file():
+            try:
+                entry["sha256"] = _digest(path)
+            except OSError:
+                entry["sha256"] = None  # not readable by us: TC-22 reports it
+        entries[str(path.relative_to(root))] = entry
+    return entries
+
+
+@dataclass
+class Workspace:
+    root: Path
+    in_dir: Path
+    out_dir: Path
+
+    @classmethod
+    def create(cls) -> "Workspace":
+        root = Path(tempfile.mkdtemp(prefix="oaax-conformance-"))
+        in_dir, out_dir = root / "in", root / "out"
+        for d in (in_dir, out_dir):
+            d.mkdir()
+            d.chmod(0o777)  # any uid the container runs as may write here
+        return cls(root, in_dir, out_dir)
+
+    def stage(self, filename: str, content: bytes) -> Path:
+        path = self.in_dir / filename
+        path.write_bytes(content)
+        path.chmod(0o644)
+        return path
+
+
+@dataclass
+class Conversion:
+    """One `docker run` of the toolchain and what it left behind."""
+
+    name: str
+    command: list[str]  # with host paths replaced by <in> / <out>
+    returncode: int
+    timed_out: bool
+    duration_ms: int
+    stdout: str
+    stderr: str
+    workspace: Workspace
+    input_before: dict
+    input_after: dict
+    output: dict  # tree of out/ after the run
+    out_path: str  # the output argument, relative to the mount
+
+    signal_name = None
+
+    @property
+    def console(self) -> str:
+        return (self.stdout + self.stderr).strip()
+
+    @property
+    def result_dir(self) -> Path:
+        return self.workspace.out_dir / Path(self.out_path).relative_to("/output")
+
+    def files(self) -> dict:
+        """Files of the result directory, relative to it."""
+        prefix = str(Path(self.out_path).relative_to("/output"))
+        prefix = "" if prefix == "." else prefix + "/"
+        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"]}
+
+    def log_files(self) -> list[str]:
+        return [n for n in self.files() if n in LOG_NAMES]
+
+    def model_files(self) -> list[str]:
+        return [n for n, v in self.files().items() if n not in LOG_NAMES and n != MANIFEST and v["size"] > 0]
+
+    def input_changes(self) -> list[str]:
+        return sorted(k for k in set(self.input_before) | set(self.input_after) if self.input_before.get(k) != self.input_after.get(k))
+
+    def observations(self) -> list[dict]:
+        listing = [{"file": n, "size": v["size"], "mode": v["mode"]} for n, v in self.files().items()]
+        obs = {"call": " ".join(self.command), "exit_code": self.returncode, "duration_ms": self.duration_ms, "output_files": listing}
+        if self.timed_out:
+            obs["never_returned"] = "timed out"
+        if self.input_changes():
+            obs["input_directory_changed"] = self.input_changes()
+        for key, text in (("stdout", self.stdout), ("stderr", self.stderr)):
+            if text.strip():
+                obs[key + "_tail"] = text[-TAIL:]
+        return [obs]
+
+
+def _redact(text: str, workspace: Workspace) -> str:
+    return text.replace(str(workspace.root), "<tmp>")
+
+
+def make_hostile_zip(model: bytes) -> bytes:
+    """A zip with a valid model and members that climb out of an extraction directory (zip-slip)."""
+    import io
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("model.onnx", model)
+        for depth in range(1, 5):
+            z.writestr("../" * depth + f"escape-{depth}.txt", "outside the output directory\n")
+    return buf.getvalue()
+
+
+@dataclass
+class ToolchainContext:
+    """What a toolchain check may use: the image under test and its conversions (each run once, cached)."""
+
+    image: str
+    onnx_path: str
+    docker_args: list[str] = field(default_factory=list)
+    timeout: int = 900
+    runtime_lib: str | None = None
+    harness: str | None = None
+    init_config: list[str] = field(default_factory=list)
+    runtime_timeout: int = 120
+    workspaces: list = field(default_factory=list)
+    leftovers: list = field(default_factory=list)
+    used: list = field(default_factory=list)
+    _runs: dict = field(default_factory=dict)
+    _inspect: dict | None = None
+    _dump: str | None = None
+
+    def runtime_context(self, model_path: str):
+        """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""
+        from .suite import Context
+
+        if not self.runtime_lib:
+            return None
+        key = f"runtime:{model_path}"
+        if key not in self._runs:
+            self._dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
+            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=self._dump)
+        return self._runs[key]
+
+    def model_bytes(self) -> bytes:
+        return Path(self.onnx_path).read_bytes()
+
+    def image_info(self) -> dict:
+        if self._inspect is None:
+            self._inspect = inspect(self.image)
+        return self._inspect
+
+    def _docker(self, ws: Workspace, name: str, argv: list[str], *, user: str | None, network: bool, read_only_rootfs: bool, ro_input: bool,
+                ro_output: bool) -> list[str]:
+        cmd = ["docker", "run", "--rm", "--name", f"oaax-conformance-{uuid.uuid4().hex[:12]}"]
+        cmd += ["--user", user or f"{os.getuid()}:{os.getgid()}"]
+        if not network:
+            cmd += ["--network", "none"]
+        if read_only_rootfs:
+            cmd += ["--read-only", "--tmpfs", "/tmp"]
+        cmd += ["-v", f"{ws.in_dir}:/input{':ro' if ro_input else ''}", "-v", f"{ws.out_dir}:/output{':ro' if ro_output else ''}"]
+        return cmd + self.docker_args + [self.image] + argv
+
+    def convert(self, name: str, *, filename: str = "model.onnx", content: bytes | None = None, out_path: str = "/output/result",
+                user: str | None = None, network: bool = True, read_only_rootfs: bool = False, ro_input: bool = False, ro_output: bool = False,
+                argv: list[str] | None = None, workspace: Workspace | None = None, wait: bool = True) -> "Conversion":
+        """Run the toolchain once. `argv` replaces the two normal arguments (wrong argument counts); `content` is the input file."""
+        if name in self._runs:
+            return self._runs[name]
+        ws = workspace or Workspace.create()
+        if ws not in self.workspaces:
+            self.workspaces.append(ws)
+        if content is not None or argv is None:
+            ws.stage(filename, self.model_bytes() if content is None else content)
+        args = argv if argv is not None else [f"/input/{filename}", out_path]
+        cmd = self._docker(ws, name, args, user=user, network=network, read_only_rootfs=read_only_rootfs, ro_input=ro_input, ro_output=ro_output)
+        before = tree(ws.in_dir)
+        started, timed_out = time.monotonic(), False
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=self.timeout)
+            code, out, err = proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired as e:
+            timed_out, code, out, err = True, -signal.SIGKILL, e.stdout or b"", e.stderr or b""
+            subprocess.run(["docker", "rm", "-f", cmd[cmd.index("--name") + 1]], capture_output=True)
+        shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
+        run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
+                         _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args))
+        self._runs[name] = run
+        return run
+
+    def convert_together(self, name: str, count: int = 2) -> list["Conversion"]:
+        """Start several conversions at the same time, each in its own workspace."""
+        if name in self._runs:
+            return self._runs[name]
+        results: list = [None] * count
+        import threading
+
+        def worker(i: int) -> None:
+            results[i] = self.convert(f"{name}-{i}")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self._runs[name] = results
+        return results
+
+    def close(self) -> None:
+        """Remove the temporary directories. Anything that cannot be removed is reported, never forced."""
+        for ws in self.workspaces:
+            try:
+                shutil.rmtree(ws.root)
+            except OSError:
+                self.leftovers.append(str(ws.root))
+        self.workspaces.clear()
+        if self._dump:
+            shutil.rmtree(self._dump, ignore_errors=True)
+
+
+def _result_path(args: list[str]) -> str:
+    """Where the results are: the last argument if it is a path under /output, else the whole output mount (wrong argument counts)."""
+    last = args[-1] if args else ""
+    return last if last == "/output" or last.startswith("/output/") else "/output"
+
+
+def default_model() -> str:
+    return str(Path(__file__).parent / "models" / "tiny-conv.onnx")
+
+
+_NAME = re.compile(r"^oaax-[a-z0-9][a-z0-9._-]*-toolchain(-[a-z0-9][a-z0-9._-]*)?:[A-Za-z0-9_][A-Za-z0-9._-]*$")
+
+
+def follows_naming(image: str) -> bool:
+    """oaax-<vendor>-toolchain[-<version>]:<tag>, with the registry/namespace prefix of the reference ignored."""
+    return bool(_NAME.match(image.rsplit("/", 1)[-1]))

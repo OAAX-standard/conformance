@@ -114,7 +114,7 @@ def test_every_approved_test_is_implemented_and_vice_versa():
 
 
 def test_every_check_has_a_fault_case():
-    assert {c[2] for c in CASES} == set(CHECKS)
+    assert {c[2] for c in CASES} == {i for i in CHECKS if i.startswith("RT-")}
 
 
 def test_exit_codes(build_dir, monkeypatch, tmp_path):
@@ -181,8 +181,8 @@ def test_report_document_and_html(build_dir, monkeypatch):
     doc = report.build(run_suite(ctx), lib, "2.0", ["secret_key=hunter2"], [])
     text = json.dumps(doc)
     assert "hunter2" not in text and doc["options"]["init_config_keys"] == ["secret_key"]  # values are never stored
-    assert doc["verdict"]["exit_code"] == 1 and doc["library"]["runtime_name"] == "OAAX Mock Runtime"
-    assert "path" not in doc["library"] and str(build_dir) not in text  # no directories in a report that gets shared
+    assert doc["verdict"]["exit_code"] == 1 and doc["subject"]["runtime_name"] == "OAAX Mock Runtime" and doc["subject"]["detail"] == "OAAX Mock Runtime v1"
+    assert "path" not in doc["subject"] and str(build_dir) not in text  # no directories in a report that gets shared
     assert doc["summary"]["counts"]["fail"] == 1 and doc["summary"]["by_level"]["MUST"]["fail"] == 1
     calls = {o["call"]: o for o in doc["scenarios"]["static"]["observations"]}
     assert "value" in calls["get_error_fresh"] and calls["get_error_fresh"]["value"] is None  # NULL is shown, not left blank
@@ -196,7 +196,7 @@ def test_report_document_and_html(build_dir, monkeypatch):
 def test_html_escapes_everything_it_shows():
     doc = {"suite_version": "x", "spec_version": "2.0", "generated_at": "t", "platform": "p",
            "verdict": {"exit_code": 1, "text": "FAILED", "note": "n"},
-           "library": {"name": "<img src=x onerror=alert(1)>", "sha256": "0", "runtime_name": "<script>", "runtime_version": None},
+           "subject": {"kind": "runtime", "name": "<img src=x onerror=alert(1)>", "sha256": "0", "detail": "<script>"},
            "options": {"init_config_keys": ["<k>"], "ignore_threads": []},
            "summary": {"total": 1, "counts": {"pass": 0, "warn": 0, "fail": 1, "error": 0, "blocked": 0, "skipped": 0},
                        "by_level": {"MUST": {}}, "draft_tests_not_run": 0},
@@ -209,7 +209,7 @@ def test_html_escapes_everything_it_shows():
 
 
 def test_report_redacts_directories_runtimes_echo_in_messages():
-    doc = {"results": [{"message": "Failed to extract model archive: /home/someone/models/model.onnx"}], "library": {"name": "x"}}
+    doc = {"results": [{"message": "Failed to extract model archive: /home/someone/models/model.onnx"}], "subject": {"name": "x"}}
     clean = report.redact(doc, ["/home/someone/models"])
     assert clean["results"][0]["message"] == "Failed to extract model archive: model.onnx"
     assert report.redact(doc, ["/"])["results"][0]["message"] == doc["results"][0]["message"]  # never redact the root
@@ -220,3 +220,16 @@ def test_only_does_not_count_unselected_tests_as_drafts(build_dir):
     suite = run_suite(ctx, ["RT-S-01"])
     drafts = sum(spec.status != "approved" for spec in load().values())
     assert len(suite.results) == 1 and suite.not_approved == drafts  # unselected approved tests are not drafts
+
+
+def test_python_reference_input_matches_the_harness(build_dir, tmp_path):
+    """E2E-04 compares the runtime with onnxruntime on `deterministic_input`: it must be what the C harness sends."""
+    np = pytest.importorskip("numpy")
+    from oaax_conformance.reference import deterministic_input
+
+    ctx = _context(build_dir, "mock_runtime")
+    ctx.dump_dir = str(tmp_path)
+    ctx.run("roundtrip").step("roundtrip")
+    x, scale = deterministic_input("FLOAT", (1, 4)), deterministic_input("FLOAT", (1,))
+    got_y = np.frombuffer((tmp_path / "roundtrip_0.bin").read_bytes(), dtype=np.float32)
+    assert np.array_equal(got_y, (x * scale).reshape(-1))
