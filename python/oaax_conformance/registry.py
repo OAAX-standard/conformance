@@ -12,6 +12,10 @@ class Blocked(Exception):
     """The check could not run (library did not load, init failed, ...); not a verdict on the runtime."""
 
 
+class NotApplicable(Exception):
+    """The model or runtime has nothing this check could test (for example one input: no "missing input" case)."""
+
+
 CHECKS: dict[str, Callable] = {}
 
 

@@ -3,7 +3,7 @@ Print it to PDF from the browser: the print stylesheet opens every section."""
 import json
 from html import escape
 
-OUTCOMES = {"pass": "Pass", "warn": "Warning", "fail": "Fail", "error": "Error", "blocked": "Blocked", "skipped": "Skipped"}
+OUTCOMES = {"pass": "Pass", "warn": "Warning", "fail": "Fail", "error": "Error", "blocked": "Blocked", "skipped": "Skipped", "na": "n/a"}
 LEVEL_HELP = {
     "MUST": "required by the spec text: a failure fails the run",
     "SHOULD": "recommended or derived from the text: a failure is a warning",
@@ -13,11 +13,11 @@ KNOWN = {"call", "status", "status_name", "value", "value_is_utf8", "error", "er
 
 CSS = """
 :root{color-scheme:light dark;--bg:#f6f7f9;--card:#fff;--text:#1b1f24;--muted:#667085;--line:#e4e7ec;--code:#f2f4f7;
---pass:#1a7f4b;--warn:#b54708;--fail:#c4321c;--error:#c4321c;--blocked:#175cd3;--skipped:#667085;
---pass-bg:#e6f4ec;--warn-bg:#fdf0dc;--fail-bg:#fbe7e4;--error-bg:#fbe7e4;--blocked-bg:#e5eefc;--skipped-bg:#eef0f3}
+--pass:#1a7f4b;--warn:#b54708;--fail:#c4321c;--error:#c4321c;--blocked:#175cd3;--skipped:#667085;--na:#667085;
+--pass-bg:#e6f4ec;--warn-bg:#fdf0dc;--fail-bg:#fbe7e4;--error-bg:#fbe7e4;--blocked-bg:#e5eefc;--skipped-bg:#eef0f3;--na-bg:#eef0f3}
 @media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2127;--text:#e8eaed;--muted:#9aa4b2;--line:#2c323a;--code:#262b33;
---pass:#5fd39a;--warn:#f5b061;--fail:#ff8a78;--error:#ff8a78;--blocked:#7fb0ff;--skipped:#9aa4b2;
---pass-bg:#16301f;--warn-bg:#3a2a12;--fail-bg:#3d1b16;--error-bg:#3d1b16;--blocked-bg:#172a49;--skipped-bg:#262b33}}
+--pass:#5fd39a;--warn:#f5b061;--fail:#ff8a78;--error:#ff8a78;--blocked:#7fb0ff;--skipped:#9aa4b2;--na:#9aa4b2;
+--pass-bg:#16301f;--warn-bg:#3a2a12;--fail-bg:#3d1b16;--error-bg:#3d1b16;--blocked-bg:#172a49;--skipped-bg:#262b33;--na-bg:#262b33}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 main{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:32px 0 10px}

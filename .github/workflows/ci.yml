@@ -20,4 +20,4 @@ jobs:
           python-version: "3.10"
       - run: pip install -e ".[test]"
       - run: ./scripts/build.sh
-      - run: python -m pytest -v
+      - run: python -m pytest -n 4 -q

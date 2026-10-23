@@ -10,9 +10,11 @@ add_compile_options(-Wall -Wextra)
 set(OAAX_SPEC_VERSION 2.0 CACHE STRING "OAAX specification version")
 set(SPEC_INCLUDE ${CMAKE_SOURCE_DIR}/spec/${OAAX_SPEC_VERSION})
 
-add_executable(oaax-harness harness/src/main.c)
-target_include_directories(oaax-harness PRIVATE ${SPEC_INCLUDE})
-target_link_libraries(oaax-harness ${CMAKE_DL_LIBS})
+find_package(Threads REQUIRED)
+add_compile_definitions(_GNU_SOURCE)
+add_executable(oaax-harness harness/src/main.c harness/src/common.c harness/src/scenarios_runtime.c harness/src/scenarios_model.c)
+target_include_directories(oaax-harness PRIVATE ${SPEC_INCLUDE} ${CMAKE_SOURCE_DIR}/harness/src)
+target_link_libraries(oaax-harness ${CMAKE_DL_LIBS} Threads::Threads)
 
 # Mock runtimes: the suite's own test fixtures (faults are switched by OAAX_MOCK_FAULT).
 # Only the 9 runtime_* functions are exported, like a clean runtime.

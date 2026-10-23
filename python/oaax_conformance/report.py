@@ -16,7 +16,7 @@ class Result:
     title: str
     level: str
     source: str
-    outcome: str  # pass | fail | warn | blocked | error | skipped
+    outcome: str  # pass | fail | warn | blocked | error | skipped | na (not applicable)
     message: str = ""
     pass_when: str = ""
     scenarios: list = field(default_factory=list)  # scenarios the check read: its evidence
@@ -29,7 +29,7 @@ def exit_code(results: list[Result]) -> int:
     return 2 if any(r.outcome in ("blocked", "skipped") and r.level == "MUST" for r in results) else 0
 
 
-COLORS = {"pass": "32", "warn": "33", "fail": "31", "error": "31", "blocked": "36", "skipped": "2"}
+COLORS = {"pass": "32", "warn": "33", "fail": "31", "error": "31", "blocked": "36", "skipped": "2", "na": "2"}
 MESSAGE_WIDTH = 160  # the JSON report keeps the full message
 
 
@@ -38,7 +38,7 @@ def _paint(outcome: str, text: str, color: bool) -> str:
 
 
 def console(results: list[Result], not_approved: int, color: bool = False, title: str = "") -> str:
-    rows = [(r.id, r.title.replace("`", ""), r.level, r.outcome.upper()) for r in results]
+    rows = [(r.id, r.title.replace("`", ""), r.level, "N/A" if r.outcome == "na" else r.outcome.upper()) for r in results]
     header = ("ID", "Check", "Level", "Status")
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(4)]
     line = lambda cells, outcome=None: "  ".join(  # noqa: E731
@@ -58,7 +58,7 @@ def console(results: list[Result], not_approved: int, color: bool = False, title
                 out.append(f"      spec: {r.source}")
 
     counts = {o: sum(r.outcome == o for r in results) for o in COLORS}
-    out += ["", ", ".join(f"{n} {o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)"]
+    out += ["", ", ".join(f"{n} {'n/a' if o == 'na' else o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)"]
     out.append(f"Result: {VERDICTS[exit_code(results)]}. {DISCLAIMER}")
     return "\n".join(out)
 
