@@ -17,12 +17,9 @@ harness/  python/oaax_conformance/  spec/2.0/  models/  fixtures/  mock-runtime/
 
 ## Distribution
 
-The suite ships as a **Docker image**. Known limits, so nobody is surprised:
+**No Docker image for the suite** (decided 2026-10-23). The runtime is loaded in the suite's own process, so it must see its vendor
+libraries and device nodes, and Windows DLLs cannot be tested from a Linux container; the toolchain tier starts Docker containers
+itself and must not need the host's Docker socket handed to another container.
 
-- The runtime is loaded *inside* the container: its vendor libraries (OpenVINO, CUDA, HailoRT, ...) and its device nodes must be
-  available there (`FROM` the suite image, `--device`, `--gpus`). Otherwise `dlopen` fails for reasons that are not the runtime's.
-- Windows DLLs cannot be tested in a Linux image.
-- The toolchain tier starts Docker containers: it needs the host's Docker socket mounted (root-equivalent on that host) or a
-  native run.
-
-A native run (`pip install` of the same Python package, harness built with CMake) stays available for those cases.
+- `pip install` of the Python package plus the C harness built with CMake (`scripts/build.sh`). Linux (x86_64, aarch64) first; Windows later.
+- The toolchain tier needs Docker on the machine running the suite, because a toolchain *is* a Docker image.
