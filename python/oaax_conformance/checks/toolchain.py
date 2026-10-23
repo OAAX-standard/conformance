@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 from .. import manifest
-from ..harness import EXIT_MODEL
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, check
 from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, follows_naming, make_hostile_zip
@@ -143,9 +142,9 @@ def readable_outputs(ctx):
     _succeeded(run, f"converting as uid {ARBITRARY_UID}")
     unreadable = []
     for rel, entry in run.output.items():
-        path = run.workspace.out_dir / rel
-        if not os.access(path, os.R_OK | (os.X_OK if entry["dir"] else 0)):
-            unreadable.append(rel)
+        mode, need = int(entry["mode"], 8), (0o005 if entry["dir"] else 0o004)  # others: read (files), read + traverse (directories)
+        if entry["uid"] != os.getuid() and mode & need != need:  # judged by the mode bits: access() says yes to everything for root
+            unreadable.append(f"{rel} ({entry['mode']})")
     if unreadable:
         raise Fail("not readable by the user who started the container: " + ", ".join(unreadable[:5]))
 
@@ -294,10 +293,11 @@ def unwritable_output(ctx):
 
 @check("TC-39")
 def hostile_archive(ctx):
-    run = ctx.convert("zip-slip", filename="evil.zip", content=make_hostile_zip(ctx.model_bytes()))
+    run = ctx.convert("zip-slip", filename="evil.zip", content=make_hostile_zip(ctx.model_bytes()), keep_container=True)
     escaped = [k for k in run.output if "escape-" in k and not k.startswith("result/")] + [k for k in run.input_after if "escape-" in k]
+    escaped += [f"{p} (inside the container)" for p in run.container_changes if "escape-" in p]
     if escaped:
-        raise Fail("the archive wrote outside the output directory: " + ", ".join(sorted(escaped)))
+        raise Fail("the archive wrote outside the directory the toolchain extracts to: " + ", ".join(sorted(escaped)))
 
 
 # ---- the image -----------------------------------------------------------------------------------------------
@@ -344,26 +344,34 @@ def _converted(ctx):
 def runtime_loads_it(ctx):
     rctx, _ = _converted(ctx)
     run = rctx.run("load-twice")
-    if run.returncode == EXIT_MODEL:
-        raise Fail(run.step("load_first").get("err") and "the runtime could not load the converted model: "
-                   + bytes.fromhex(run.step("load_first")["err"]).decode(errors="replace"))
+    if run.end == "model":
+        raise Fail("the runtime could not load the converted model" + run._why_missing("load_first").split("--model", 1)[-1].replace(")", "", 1).rstrip())
     run.step("load_first")
+
+
+def _runtime_run(ctx, scenario: str):
+    """The converted model in the runtime, after the checks every end-to-end test needs: the model loads, and what it takes is known."""
+    from .runtime_model import _answered
+
+    rctx, path = _converted(ctx)
+    rctx.model_io()  # Blocked: the converted model's inputs cannot be read (no manifest, not ONNX): no request can be built
+    run = rctx.run(scenario)
+    if run.end == "model":
+        raise Blocked("the converted model does not load (see E2E-01)")
+    return rctx, path, run, _answered
 
 
 @check("E2E-02")
 def runtime_answers(ctx):
-    from .runtime_model import _answered
-
-    rctx, _ = _converted(ctx)
-    run = rctx.run("roundtrip")
-    if run.returncode == EXIT_MODEL:
-        raise Blocked("the converted model does not load (see E2E-01)")
-    _answered(run, "roundtrip")
+    _, _, run, answered = _runtime_run(ctx, "roundtrip")
+    answered(run, "roundtrip")
 
 
-def _io_views(model_path: str, doc: dict | None, onnx_path: str):
+def _io_views(model_path: str, doc: dict | None):
     """(inputs, outputs) of the converted model as {name: (dtype, shape)}: from its manifest's onnx views, or from the ONNX file itself."""
     if doc:
+        if not all("onnx" in t for k in ("inputs", "outputs") for t in doc[k]):
+            return None  # outputs without an onnx view: the manifest says the model is not equivalent (checked by the caller)
         return [{t["name"]: (t["onnx"]["dtype"], tuple(t["onnx"]["shape"])) for t in doc[k]} for k in ("inputs", "outputs")]
     if Path(model_path).suffix == ".onnx":
         io = manifest.derive_io(model_path)
@@ -374,10 +382,13 @@ def _io_views(model_path: str, doc: dict | None, onnx_path: str):
 @check("E2E-03")
 def io_is_retained(ctx):
     _, path = _converted(ctx)
-    run = _valid(ctx)
+    doc = _manifest_doc(_valid(ctx))
+    if doc and doc.get("equivalent") is False:
+        raise Fail("the manifest declares equivalent: false: the runtime does not return the original model's outputs "
+                   f"(it returns {', '.join(t['name'] for t in doc['outputs'])}); the spec requires the names and shapes to be retained")
     try:
-        converted = _io_views(path, _manifest_doc(run), ctx.onnx_path)
-        original = _io_views(ctx.onnx_path, None, ctx.onnx_path)
+        converted = _io_views(path, doc)
+        original = _io_views(ctx.onnx_path, None)
     except ImportError:
         raise Blocked("reading ONNX models needs the onnx extra: pip install oaax-conformance[onnx]")
     if converted is None:
@@ -401,17 +412,17 @@ def same_results(ctx):
         raise Blocked("needs the e2e extra: pip install oaax-conformance[e2e]")
     from ..reference import deterministic_input
 
-    rctx, path = _converted(ctx)
-    run = rctx.run("roundtrip")
-    if run.returncode == EXIT_MODEL:
-        raise Blocked("the converted model does not load (see E2E-01)")
-    obs = run.step("roundtrip")
+    doc = _manifest_doc(_valid(ctx))
+    if doc and doc.get("equivalent") is False:
+        raise NotApplicable("the manifest declares equivalent: false: the outputs are not the original's, so there is nothing to compare")
+    rctx, path, run, answered = _runtime_run(ctx, "roundtrip")
+    obs = answered(run, "roundtrip")
     try:
         io = discover(ctx.onnx_path, [])
     except NoModelIO as e:
         raise Blocked(str(e))
     session = onnxruntime.InferenceSession(ctx.onnx_path, providers=["CPUExecutionProvider"])
-    feeds = {t.name: deterministic_input(t.dtype, t.shape) for t in io.inputs}
+    feeds = {t.name: deterministic_input(t.dtype, t.concrete_shape()) for t in io.inputs}
     expected = dict(zip([o.name for o in session.get_outputs()], session.run(None, feeds)))
     got = {}
     for i, tensor in enumerate(obs["tensors"]):

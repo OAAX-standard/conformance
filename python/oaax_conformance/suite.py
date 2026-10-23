@@ -3,6 +3,7 @@ import traceback
 from dataclasses import dataclass, field
 
 from . import checks  # noqa: F401  (registers the checks)
+import sys
 import time
 
 from .harness import Run, run_scenario
@@ -21,7 +22,7 @@ class Context:
     init_config: list[str] = field(default_factory=list)
     model: str | None = None  # --model: a model file this runtime can load; enables the model tier
     ignore_threads: list[str] = field(default_factory=list)
-    timeout: int = 60
+    timeout: int = 300  # seconds per scenario; loops stop at 60% of it, a call still running at the limit is blocked, not failed
     cycles: int = 50
     settle_ms: int = 3000
     manual_inputs: list = field(default_factory=list)  # --input NAME:DTYPE:DIMS: when the model cannot be read
@@ -31,9 +32,12 @@ class Context:
     per_producer: int = 25
     model_cycles: int = 20
     dump_dir: str | None = None  # the harness writes the outputs of the roundtrip scenario here (E2E tests)
-    retrieve_timeout_ms: int = 10000  # how long a round trip waits for its output
+    retrieve_timeout_ms: int = 10000  # how long a round trip waits for its output (scaled up from the first answered request)
+    warmup_ms: int = 120000  # how long the very first request of a scenario may take
     lost_after_ms: int = 3000  # a request not answered after this long counts as lost
     pause: float = 0.0  # seconds between scenarios, for hardware that needs to settle
+    workdir: str | None = None  # the harness runs here (default: a fresh temporary directory), for runtimes that need relative files
+    progress: bool = False  # print each scenario to stderr as it starts
     _runs: dict = field(default_factory=dict)
     _io: ModelIO | None = None
     used: list = field(default_factory=list)  # scenarios read by the check running now
@@ -59,13 +63,18 @@ class Context:
         if scenario not in self._runs:
             if self._runs and self.pause:
                 time.sleep(self.pause)
-            self._runs[scenario] = run_scenario(self.harness, scenario, self.lib, self.init_config, self.timeout, self._args())
+            if self.progress:
+                print(f"  running {scenario} ...", file=sys.stderr, flush=True)
+            self._runs[scenario] = run_scenario(self.harness, scenario, self.lib, self.init_config, self.timeout, self._args(), self.workdir)
+            warmup = next((l for l in self._runs[scenario].lines if l.get("step") == "warmup"), None)
+            if warmup and warmup.get("status") != 0:  # the first request was not answered: do not wait that long again in every scenario
+                self.warmup_ms = min(self.warmup_ms, 10000)
         return self._runs[scenario]
 
     def _args(self) -> list[str]:
         args = ["--cycles", str(self.cycles), "--settle-ms", str(self.settle_ms), "--flood", str(self.flood), "--requests", str(self.requests),
                 "--producers", str(self.producers), "--per-producer", str(self.per_producer), "--model-cycles", str(self.model_cycles),
-                "--timeout-ms", str(self.retrieve_timeout_ms), "--lost-after-ms", str(self.lost_after_ms)]
+                "--timeout-ms", str(self.retrieve_timeout_ms), "--lost-after-ms", str(self.lost_after_ms), "--warmup-ms", str(self.warmup_ms)]
         if self.dump_dir:
             args += ["--dump", self.dump_dir]
         if self.model:
@@ -78,12 +87,15 @@ class Context:
         return args
 
 
-def run_check(spec: Spec, ctx: Context) -> Result:
+def run_check(spec: Spec, ctx, skip: dict | None = None) -> Result:
     result = Result(spec.id, spec.title, spec.level, spec.source, "pass", pass_when=spec.pass_when)
     ctx.used = []
     fn = CHECKS.get(spec.id)
+    if skip and spec.id in skip:
+        result.outcome, result.message = "skipped", skip[spec.id]
+        return result
     if fn is None:
-        result.outcome, result.message = "skipped", "approved but not implemented"
+        result.outcome, result.message = "error", "approved in the specification but not implemented (a bug of the suite)"
         return result
     try:
         fn(ctx)
@@ -107,12 +119,12 @@ class SuiteRun:
     leftovers: list = field(default_factory=list)  # temporary directories that could not be removed
 
 
-def run_suite(ctx, only: list[str] | None = None, prefixes: tuple = ("RT-",)) -> SuiteRun:
+def run_suite(ctx, only: list[str] | None = None, prefixes: tuple = ("RT-",), skip: dict | None = None) -> SuiteRun:
     """Run the approved checks whose id starts with one of `prefixes` (RT- for a runtime, TC- and E2E- for a toolchain)."""
     specs = {i: s for i, s in load().items() if i.startswith(prefixes)}
     approved = [s for s in specs.values() if s.status == "approved"]
     selected = [s for s in approved if not only or s.id in only]
-    results = [run_check(s, ctx) for s in selected]
+    results = [run_check(s, ctx, skip) for s in selected]
     runs = {k: v for k, v in ctx._runs.items() if not isinstance(v, (list, Context))}
     for key, value in ctx._runs.items():
         if isinstance(value, list):  # conversions started together

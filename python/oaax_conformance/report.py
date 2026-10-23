@@ -2,8 +2,9 @@
 import hashlib
 import json
 import platform
+import re
 from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -23,10 +24,13 @@ class Result:
 
 
 def exit_code(results: list[Result]) -> int:
-    """1 = a MUST failed or a check errored; 2 = nothing failed but a MUST could not run; 0 = clean."""
-    if any(r.outcome in ("fail", "error") for r in results):
+    """0 = clean; 1 = a MUST failed; 2 = nothing failed but a MUST could not run; 4 = a check of the suite itself crashed (3 is used by the CLI
+    for a bad command line or a missing Docker). A failed MUST wins over a suite error: that verdict stands."""
+    if any(r.outcome == "fail" for r in results):
         return 1
-    return 2 if any(r.outcome in ("blocked", "skipped") and r.level == "MUST" for r in results) else 0
+    if any(r.outcome == "error" for r in results):
+        return 4
+    return 2 if any(r.outcome == "blocked" and r.level == "MUST" for r in results) else 0
 
 
 COLORS = {"pass": "32", "warn": "33", "fail": "31", "error": "31", "blocked": "36", "skipped": "2", "na": "2"}
@@ -63,19 +67,63 @@ def console(results: list[Result], not_approved: int, color: bool = False, title
     return "\n".join(out)
 
 
-VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run"}
+VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run",
+            4: "INTERNAL ERROR: a check of the suite crashed (a bug of the suite, not a verdict on the runtime)"}
 DISCLAIMER = "This run covers only the approved tests; it is not a full conformance claim."
 
 
-def redact(doc: dict, private_paths: list[str]) -> dict:
-    """Runtimes put the paths they were given into their messages; a report that gets shared must not carry them."""
-    text = json.dumps(doc, ensure_ascii=False)
-    for path in sorted({p.rstrip("/") for p in private_paths if p and p != "/"}, key=len, reverse=True):
-        text = text.replace(json.dumps(path)[1:-1] + "/", "")
-    return json.loads(text)
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
 
 
-def _document(suite, spec_version: str, subject: dict, options: dict, private_paths: list[str]) -> dict:
+def clean_text(text: str, private_paths: list[str] = (), secrets: list[str] = ()) -> str:
+    """What is safe to show and to share: no control characters (they break XML and terminals), no directories, no secret values.
+    Runtimes put the paths and the configuration they were given into their own messages."""
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    for path in sorted({p.rstrip("/") for p in private_paths if p and p.rstrip("/")}, key=len, reverse=True):
+        text = text.replace(path + "/", "").replace(path, "<dir>")
+    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+def scrub(value, private_paths: list[str] = (), secrets: list[str] = ()):
+    """clean_text on every string of a JSON-like structure (keys included)."""
+    if isinstance(value, str):
+        return clean_text(value, private_paths, secrets)
+    if isinstance(value, list):
+        return [scrub(v, private_paths, secrets) for v in value]
+    if isinstance(value, dict):
+        return {clean_text(k, private_paths, secrets): scrub(v, private_paths, secrets) for k, v in value.items()}
+    return value
+
+
+def scrub_results(results: list[Result], private_paths: list[str], secrets: list[str]) -> list[Result]:
+    """The results as they are shown on the console: the same cleaning as the reports."""
+    return [replace(r, message=clean_text(r.message, private_paths, secrets), title=clean_text(r.title)) for r in results]
+
+
+def mask_docker_args(args: list[str]) -> list[str]:
+    """Environment values are the likeliest secrets in docker arguments: show the variable, not the value."""
+    out, after_env = [], False
+    for arg in args:
+        masked = arg
+        if arg.startswith("--env=") or after_env or (arg.startswith("-e") and arg != "-e" and "=" in arg):
+            head = "--env=" if arg.startswith("--env=") else "-e" if arg.startswith("-e") and not after_env else ""
+            name, sep, _ = arg[len(head):].partition("=")
+            masked = head + name + sep + "***" if sep else arg
+        out.append(masked)
+        after_env = arg in ("-e", "--env")
+    return out
+
+
+def secret_values(init_config: list[str], docker_args: list[str]) -> list[str]:
+    """Every value that must never appear in a report: --init-config values and environment values given to docker."""
+    values = [pair.split("=", 1)[1] for pair in init_config if "=" in pair]
+    masked = mask_docker_args(docker_args)
+    values += [orig.split("=", 1)[1] for orig, new in zip(docker_args, masked) if orig != new and "=" in orig]
+    return [v for v in values if len(v) >= 3]  # a one-character "secret" would shred every message
+
+
+def _document(suite, spec_version: str, subject: dict, options: dict, private_paths: list[str], secrets: list[str]) -> dict:
     results = suite.results
     levels = sorted({r.level for r in results}, key=["MUST", "SHOULD", "PROPOSED"].index)
     code = exit_code(results)
@@ -107,7 +155,7 @@ def _document(suite, spec_version: str, subject: dict, options: dict, private_pa
     }
     if suite.leftovers:
         doc["leftovers"] = suite.leftovers
-    return redact(doc, [*private_paths, str(Path.home())])
+    return scrub(doc, [*private_paths, str(Path.home())], secrets)
 
 
 def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str], private_paths: list[str] = ()) -> dict:
@@ -124,15 +172,16 @@ def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_thr
     subject = {"kind": "runtime", "name": Path(lib).name, "sha256": hashlib.sha256(Path(lib).read_bytes()).hexdigest(), "detail": detail, **identity}
     # values are not stored: vendor keys can hold licences or paths
     options = {"init_config_keys": [pair.split("=", 1)[0] for pair in init_config], "ignore_threads": ignore_threads}
-    return _document(suite, spec_version, subject, options, [str(Path(lib).parent), *private_paths])
+    return _document(suite, spec_version, subject, options, [str(Path(lib).parent), *private_paths], secret_values(init_config, []))
 
 
-def build_toolchain(suite, image: str, info: dict, spec_version: str, docker_args: list[str], runtime: str | None, private_paths: list[str] = ()) -> dict:
+def build_toolchain(suite, image: str, info: dict, spec_version: str, docker_args: list[str], runtime: str | None, private_paths: list[str] = (),
+                    init_config: list[str] = ()) -> dict:
     """The complete report of a toolchain run."""
     subject = {"kind": "toolchain", "name": image, "sha256": info["id"].removeprefix("sha256:"),
                "detail": f"{info.get('os') or '?'}/{info.get('architecture') or '?'}"}
-    options = {"docker_args": docker_args, "runtime": Path(runtime).name if runtime else None}
-    return _document(suite, spec_version, subject, options, list(private_paths))
+    options = {"docker_args": mask_docker_args(docker_args), "runtime": Path(runtime).name if runtime else None}
+    return _document(suite, spec_version, subject, options, list(private_paths), secret_values(init_config, docker_args))
 
 
 def write_json(path: str, doc: dict) -> None:

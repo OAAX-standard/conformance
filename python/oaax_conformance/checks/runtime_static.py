@@ -30,6 +30,9 @@ def only_the_nine_exports(ctx):
     nm, readelf = shutil.which("nm"), shutil.which("readelf")
     if not nm or not readelf:
         raise Blocked("nm/readelf not found")
+    with open(ctx.lib, "rb") as f:
+        if f.read(4) != b"\x7fELF":
+            raise Blocked("the library is not an ELF file: its exports cannot be listed here")
     listing = subprocess.run([nm, "-D", "--defined-only", ctx.lib], capture_output=True, text=True).stdout
     # "A" = absolute: the version node of a linker version script (e.g. OAAX_V2), not an exported function
     exported = {parts[-1].split("@")[0] for parts in map(str.split, listing.splitlines()) if len(parts) == 3 and parts[1] != "A"}
