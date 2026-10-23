@@ -40,11 +40,12 @@ CASES = [
     ("stale_error", "mock_runtime", "RT-L-15"),
     ("null_ptr_ignored", "mock_runtime", "RT-L-16"),
     ("null_ptr_crash", "mock_runtime", "RT-L-16"),
+    ("load_twice_ok", "mock_runtime", "RT-M-01"),
 ]
 
 
 def _run(build_dir, variant, init_config=("vendor_key=1",)):
-    ctx = Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), settle_ms=500, timeout=30)
+    ctx = Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model"), settle_ms=500, timeout=30)
     return {r.id: r for r in run_suite(ctx).results}
 
 
@@ -85,6 +86,20 @@ def test_exit_codes(build_dir, monkeypatch, tmp_path):
     assert {p.name for p in (tmp_path / "out").iterdir()} == {"report.html", "report.json", "junit.xml"}
     monkeypatch.setenv("OAAX_MOCK_FAULT", "require_config")  # init needs a key and none is given: lifecycle MUSTs cannot run
     assert cli.main(base[:-2]) == 2
+
+
+def test_model_tests_are_blocked_without_a_model(build_dir):
+    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], settle_ms=500, timeout=30)
+    result = {r.id: r for r in run_suite(ctx).results}["RT-M-01"]
+    assert result.outcome == "blocked" and "--model" in result.message
+
+
+def test_a_model_the_runtime_cannot_load_blocks_instead_of_failing(build_dir, tmp_path):
+    bad = tmp_path / "bad.model"
+    bad.write_bytes(b"not a mock model")
+    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], str(bad), settle_ms=500, timeout=30)
+    result = {r.id: r for r in run_suite(ctx).results}["RT-M-01"]
+    assert result.outcome == "blocked" and "could not load the model" in result.message
 
 
 def test_exit_code_function():
@@ -148,3 +163,16 @@ def test_html_escapes_everything_it_shows():
                                     "observations": [{"call": "<c>", "status": 0, "status_name": "SUCCESS", "value": "<script>", "extra": "<e>"}]}}}
     page = html_report.render(doc)
     assert "<script>alert" not in page and "<img src=x" not in page and "<c>" not in page
+
+
+def test_report_redacts_directories_runtimes_echo_in_messages():
+    doc = {"results": [{"message": "Failed to extract model archive: /home/someone/models/model.onnx"}], "library": {"name": "x"}}
+    clean = report.redact(doc, ["/home/someone/models"])
+    assert clean["results"][0]["message"] == "Failed to extract model archive: model.onnx"
+    assert report.redact(doc, ["/"])["results"][0]["message"] == doc["results"][0]["message"]  # never redact the root
+
+
+def test_only_does_not_count_unselected_tests_as_drafts(build_dir):
+    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], settle_ms=500, timeout=30)
+    suite = run_suite(ctx, ["RT-S-01"])
+    assert len(suite.results) == 1 and suite.not_approved == 0

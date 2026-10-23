@@ -20,3 +20,4 @@ a MUST that the spec text does not support makes the suite wrong, not the vendor
 ## Files
 
 - [`runtime-static-lifecycle.md`](runtime-static-lifecycle.md): batch 1, runtime without a model.
+- [`runtime-model.md`](runtime-model.md): batch 2, tests that need a model (`--model`).

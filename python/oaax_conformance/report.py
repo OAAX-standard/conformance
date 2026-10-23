@@ -67,7 +67,15 @@ VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST ch
 DISCLAIMER = "This run covers only the approved tests; it is not a full conformance claim."
 
 
-def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str]) -> dict:
+def redact(doc: dict, private_paths: list[str]) -> dict:
+    """Runtimes put the paths they were given into their messages; a report that gets shared must not carry them."""
+    text = json.dumps(doc, ensure_ascii=False)
+    for path in sorted({p.rstrip("/") for p in private_paths if p and p != "/"}, key=len, reverse=True):
+        text = text.replace(json.dumps(path)[1:-1] + "/", "")
+    return json.loads(text)
+
+
+def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str], private_paths: list[str] = ()) -> dict:
     """The complete report: the JSON file is this document, the HTML page is rendered from it."""
     results = suite.results
     levels = sorted({r.level for r in results}, key=["MUST", "SHOULD", "PROPOSED"].index)
@@ -80,7 +88,7 @@ def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_thr
             raw = None
         identity[key] = raw.decode("utf-8", errors="replace") if raw else None
     code = exit_code(results)
-    return {
+    doc = {
         "suite_version": __version__,
         "spec_version": spec_version,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -108,6 +116,7 @@ def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_thr
             for name, run in suite.runs.items()
         },
     }
+    return redact(doc, [str(Path(lib).parent), *private_paths, str(Path.home())])
 
 
 def write_json(path: str, doc: dict) -> None:

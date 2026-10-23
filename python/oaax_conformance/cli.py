@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     rt = sub.add_parser("runtime", help="check a runtime library (.so)")
     rt.add_argument("library")
     rt.add_argument("--init-config", action="append", default=[], metavar="KEY=VALUE", help="runtime_init key (repeatable)")
+    rt.add_argument("--model", metavar="FILE", help="a model file this runtime can load: enables the tests that need one")
     rt.add_argument("--ignore-thread", action="append", default=[], metavar="NAME", help="driver thread name to excuse in RT-L-08")
     rt.add_argument("--only", action="append", metavar="ID", help="run only this test id (repeatable)")
     rt.add_argument("--timeout", type=int, default=60, help="seconds per scenario")
@@ -24,12 +25,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     lib = str(Path(args.library).resolve())
-    ctx = Context(lib, find_harness(args.harness), args.init_config, args.ignore_thread, args.timeout)
+    model = str(Path(args.model).resolve()) if args.model else None
+    ctx = Context(lib, find_harness(args.harness), args.init_config, model, args.ignore_thread, args.timeout)
     suite = run_suite(ctx, args.only)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     print(report.console(suite.results, suite.not_approved, color, f"OAAX {SPEC_VERSION} runtime conformance: {Path(lib).name}\n"))
     if args.out:
-        doc = report.build(suite, lib, SPEC_VERSION, args.init_config, args.ignore_thread)
+        doc = report.build(suite, lib, SPEC_VERSION, args.init_config, args.ignore_thread, [str(Path(model).parent)] if model else [])
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
         report.write_json(str(out / "report.json"), doc)

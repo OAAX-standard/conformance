@@ -37,8 +37,10 @@ Every test carries the spec clause it comes from and a level:
 ```bash
 scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
 pip install -e .
-oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--ignore-thread NAME] [--out DIR]
+oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--ignore-thread NAME] [--out DIR]
 ```
+
+`--model FILE` is a model the runtime can load; it enables the tests that need one (they are `BLOCKED` without it).
 
 Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
 

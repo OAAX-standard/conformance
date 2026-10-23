@@ -13,7 +13,7 @@
 
 #define EXPORT __attribute__((visibility("default")))
 
-static int initialized, cleaned_once, has_error;
+static int initialized, cleaned_once, has_error, models_loaded;
 static char error_text[160];
 
 static int fault(const char *name) {
@@ -69,15 +69,21 @@ EXPORT RuntimeStatus runtime_init(Config config) {
   return RUNTIME_STATUS_SUCCESS;
 }
 
-// The mock has no models: a missing file is FILE_NOT_FOUND, any other file is INVALID_MODEL.
+// The mock "model" is any file that starts with MOCKMODEL. Loading is once per init: a later call is an error.
+// A missing file is FILE_NOT_FOUND, any other file INVALID_MODEL.
 EXPORT RuntimeStatus runtime_load_models(int num_models, const ModelConfig *model_configs) {
   if (!initialized) return not_initialized();
   if (num_models < 1 || !model_configs || !model_configs[0].file_path) return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "no model given");
+  if (models_loaded && !fault("load_twice_ok")) return fail(RUNTIME_STATUS_ALREADY_INITIALIZED, "models are already loaded");
   if (fault("load_error_generic")) return fail(RUNTIME_STATUS_ERROR, "failed to load the model");
   FILE *f = fopen(model_configs[0].file_path, "rb");
   if (!f) return fail(RUNTIME_STATUS_FILE_NOT_FOUND, "model file not found");
+  char magic[9] = "";
+  size_t n = fread(magic, 1, sizeof magic, f);
   fclose(f);
-  return fail(RUNTIME_STATUS_INVALID_MODEL, "not a model");
+  if (n != sizeof magic || memcmp(magic, "MOCKMODEL", sizeof magic)) return fail(RUNTIME_STATUS_INVALID_MODEL, "not a model");
+  models_loaded = 1;
+  return RUNTIME_STATUS_SUCCESS;
 }
 
 EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input_tensors) {
@@ -98,6 +104,7 @@ EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_ten
 EXPORT RuntimeStatus runtime_cleanup(void) {
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
   initialized = 0;
+  models_loaded = 0;
   cleaned_once = 1;
   return RUNTIME_STATUS_SUCCESS;
 }

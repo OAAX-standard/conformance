@@ -13,7 +13,7 @@
 
 #include "interface.h"
 
-enum { EXIT_DLOPEN = 3, EXIT_SYMBOLS = 4, EXIT_INIT = 5, EXIT_USAGE = 2 };
+enum { EXIT_DLOPEN = 3, EXIT_SYMBOLS = 4, EXIT_INIT = 5, EXIT_MODEL = 6, EXIT_USAGE = 2 };
 #define NO_STATUS INT_MIN
 
 typedef RuntimeStatus (*init_fn)(Config);
@@ -46,7 +46,7 @@ static const struct { const char *name; void **slot; } SYMBOLS[] = {
 #define NUM_SYMBOLS (sizeof SYMBOLS / sizeof SYMBOLS[0])
 
 static struct {
-  const char *scenario, *lib, *out;
+  const char *scenario, *lib, *out, *model;
   int cycles, settle_ms;
   Config config;  // from -c key=value
 } opt = {.cycles = 50, .settle_ms = 3000};
@@ -384,6 +384,27 @@ static int scenario_null_pointers(void) {
   return 0;
 }
 
+// Model tier. Loading the model the user passed with -m is the precondition of every scenario here: if it fails, the
+// scenario ends with EXIT_MODEL and its checks are "blocked", not failed.
+static void load_user_model(const char *step) {
+  ModelConfig model = {.file_path = opt.model};
+  begin(step);
+  RuntimeStatus s = rt.load_models(1, &model);
+  done(step, s, NULL, NULL);
+  if (s != RUNTIME_STATUS_SUCCESS) exit(EXIT_MODEL);
+}
+
+// A second load_models call after a successful one.
+static int scenario_load_twice(void) {
+  do_init("init", opt.config, 1);
+  load_user_model("load_first");
+  ModelConfig model = {.file_path = opt.model};
+  begin("load_second");
+  done("load_second", rt.load_models(1, &model), NULL, NULL);
+  do_cleanup("cleanup");
+  return 0;
+}
+
 static const struct { const char *name; int (*run)(void); } SCENARIOS[] = {
     {"static", scenario_static},
     {"lifecycle", scenario_lifecycle},
@@ -392,12 +413,13 @@ static const struct { const char *name; int (*run)(void); } SCENARIOS[] = {
     {"exit-without-cleanup", scenario_exit_without_cleanup},
     {"errors", scenario_errors},
     {"null-pointers", scenario_null_pointers},
+    {"load-twice", scenario_load_twice},
 };
 
 // ---- main ---------------------------------------------------------------------------------------------------
 
 static int usage(void) {
-  fprintf(stderr, "usage: oaax-harness <scenario> <library> --out FILE [-c key=value]... [--cycles N] [--settle-ms N]\n");
+  fprintf(stderr, "usage: oaax-harness <scenario> <library> --out FILE [-c key=value]... [-m MODEL] [--cycles N] [--settle-ms N]\n");
   return EXIT_USAGE;
 }
 
@@ -412,6 +434,7 @@ static int parse(int argc, char **argv) {
     if (!strcmp(argv[i], "--out") && has_value) opt.out = argv[++i];
     else if (!strcmp(argv[i], "--cycles") && has_value) opt.cycles = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--settle-ms") && has_value) opt.settle_ms = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "-m") && has_value) opt.model = argv[++i];
     else if (!strcmp(argv[i], "-c") && has_value) {
       char *eq = strchr(argv[++i], '=');
       if (!eq) return usage();

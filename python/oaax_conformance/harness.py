@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .registry import Blocked, Fail
 
-EXIT_DLOPEN, EXIT_SYMBOLS, EXIT_INIT = 3, 4, 5
+EXIT_DLOPEN, EXIT_SYMBOLS, EXIT_INIT, EXIT_MODEL = 3, 4, 5, 6
 # RuntimeStatus of the 2.0 header (tests/test_suite.py checks this table against spec/2.0/interface.h)
 STATUS_NAMES = ["SUCCESS", "ERROR", "NOT_INITIALIZED", "ALREADY_INITIALIZED", "MODEL_NOT_LOADED", "INVALID_ARGUMENT", "INVALID_MODEL",
                 "FILE_NOT_FOUND", "OUT_OF_MEMORY", "INVALID_TENSOR", "TENSOR_SHAPE_MISMATCH", "TENSOR_TYPE_MISMATCH", "NO_OUTPUT_AVAILABLE",
@@ -99,6 +99,10 @@ class Run:
             init = next((l for l in self.lines if l.get("step") == "init"), {})
             err = bytes.fromhex(init["err"]).decode(errors="replace") if init.get("err") else "no error text"
             return f"init failed with status {init.get('status')} ({err}); pass --init-config for this runtime"
+        if self.returncode == EXIT_MODEL:
+            load = next((l for l in self.lines if l.get("step", "").startswith("load_") and l.get("status")), {})
+            err = bytes.fromhex(load["err"]).decode(errors="replace") if load.get("err") else "no error text"
+            return f"the runtime could not load the model given with --model (status {load.get('status')}: {err})"
         if self.crashed_in:
             return f"the scenario died in {self.crashed_in}"
         return f"the scenario ended (exit {self.returncode}) before {name}"
