@@ -4,7 +4,7 @@
 #include "common.h"
 
 struct Runtime rt;
-struct Options opt = {.cycles = 50, .settle_ms = 3000, .flood = 1000, .requests = 500, .producers = 4, .per_producer = 25, .model_cycles = 20, .timeout_ms = 10000, .lost_after_ms = 3000};
+struct Options opt = {.cycles = 50, .settle_ms = 3000, .flood = 1000, .requests = 500, .producers = 4, .per_producer = 25, .model_cycles = 20, .timeout_ms = 10000, .lost_after_ms = 3000, .warmup_ms = 120000};
 FILE *out;
 void *lib_handle;
 
@@ -35,6 +35,30 @@ void put_hex(const char *s) {
   fputc('"', out);
 }
 
+void put_hex_bytes(const char *s, size_t n) {
+  fputc('"', out);
+  for (size_t i = 0; i < n; i++) fprintf(out, "%02x", (unsigned char)s[i]);
+  fputc('"', out);
+}
+
+void end_marker(const char *reason) {
+  fprintf(out, "{\"end\":\"%s\"}\n", reason);
+  fflush(out);
+}
+
+double now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static double process_start_ms = -1;
+int out_of_time(double started_ms) {
+  (void)started_ms;
+  if (process_start_ms < 0) process_start_ms = now_ms();
+  return opt.budget_ms > 0 && now_ms() - process_start_ms > opt.budget_ms;
+}
+
 void begin(const char *step) {
   fprintf(out, "{\"begin\":\"%s\"}\n", step);
   fflush(out);
@@ -63,16 +87,18 @@ void thread_names(char *buf, size_t size) {
   DIR *dir = opendir("/proc/self/task");
   struct dirent *e;
   int first = 1;
-  while (dir && (e = readdir(dir)) && n + 80 < size) {
+  while (dir && (e = readdir(dir)) && n + 140 < size) {
     if (e->d_name[0] == '.') continue;
     char path[320], name[64] = "?";
     snprintf(path, sizeof path, "/proc/self/task/%s/comm", e->d_name);
     FILE *f = fopen(path, "r");
     if (f) {
-      if (fgets(name, sizeof name, f)) name[strcspn(name, "\n\"\\")] = 0;
+      if (fgets(name, sizeof name, f)) name[strcspn(name, "\n")] = 0;
       fclose(f);
     }
-    n += snprintf(buf + n, size - n, "%s\"%.40s\"", first ? "" : ",", name);
+    n += snprintf(buf + n, size - n, "%s\"", first ? "" : ",");
+    for (const char *p = name; *p && n + 4 < size; p++) n += snprintf(buf + n, size - n, "%02x", (unsigned char)*p);  // thread names are bytes
+    n += snprintf(buf + n, size - n, "\"");
     first = 0;
   }
   if (dir) closedir(dir);
@@ -141,12 +167,18 @@ Tensors *make_input(void) {
   return t;
 }
 
+// Frees every distinct pointer once: a runtime whose outputs alias one buffer (RT-M-10) must not crash the harness with a double free.
 void free_tensors(Tensors *t) {
   if (!t) return;
-  for (int i = 0; i < t->num_tensors; i++) {
-    free(t->tensors[i].name);
-    free(t->tensors[i].shape);
-    free(t->tensors[i].data);
+  void *seen[160];
+  int n = 0;
+  for (int i = 0; i < t->num_tensors && i < 16; i++) {
+    void *ptrs[3] = {t->tensors[i].name, t->tensors[i].shape, t->tensors[i].data};
+    for (int k = 0; k < 3; k++) {
+      int dup = 0;
+      for (int j = 0; j < n; j++) dup |= seen[j] == ptrs[k];
+      if (!dup && ptrs[k]) seen[n++] = ptrs[k], free(ptrs[k]);
+    }
   }
   free(t->tensors);
   free(t);
@@ -172,7 +204,10 @@ int do_init(const char *step, Config config, int fatal) {
   begin(step);
   RuntimeStatus s = rt.init(config);
   done(step, s, NULL, NULL);
-  if (fatal && s != RUNTIME_STATUS_SUCCESS) exit(EXIT_INIT);
+  if (fatal && s != RUNTIME_STATUS_SUCCESS) {
+    end_marker("init");
+    exit(EXIT_INIT);
+  }
   return s;
 }
 

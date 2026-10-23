@@ -41,6 +41,8 @@ int scenario_lifecycle(void) {
   snprintf(extra, sizeof extra, "\"threads\":%s", names);
   done("threads_baseline", NO_STATUS, NULL, extra);
 
+  do_init("init_plain", opt.config, 1);  // a runtime that cannot start with the user's config is "blocked", not failed
+  do_cleanup("cleanup_plain");
   if (do_init("init_unknown_key", user_config_plus("oaax_conformance_unknown_key", "1"), 0) == RUNTIME_STATUS_SUCCESS)
     do_cleanup("cleanup_after_unknown_key");
   Config empty = {0};
@@ -51,6 +53,7 @@ int scenario_lifecycle(void) {
   do_init("init_second", opt.config, 0);
   do_string("info_after_second_init", rt.get_info);
   do_cleanup("cleanup");
+  do_cleanup("cleanup_again");  // idempotent: a second cleanup is as good as the first
   do_string("info_after_cleanup", rt.get_info);
 
   settle(baseline, opt.settle_ms);
@@ -64,23 +67,25 @@ int scenario_lifecycle(void) {
 int scenario_cycles(void) {
   do_init("init", opt.config, 1);  // a runtime that cannot start at all is "blocked", not a re-init failure
   do_cleanup("cleanup_first");
-  int baseline = thread_count(), init_failures = 0, cleanup_failures = 0;
+  int baseline = thread_count(), init_failures = 0, cleanup_failures = 0, completed = 0;
   long rss_first = -1;
   char first_failure[128] = "";
-  for (int i = 0; i < opt.cycles; i++) {
+  for (int i = 0; i < opt.cycles && !out_of_time(0); i++) {
     begin("cycle");
     RuntimeStatus si = rt.init(opt.config), sc = si == RUNTIME_STATUS_SUCCESS ? rt.cleanup() : RUNTIME_STATUS_ERROR;
     init_failures += si != RUNTIME_STATUS_SUCCESS;
     cleanup_failures += sc != RUNTIME_STATUS_SUCCESS;
-    if ((si || sc) && !*first_failure) snprintf(first_failure, sizeof first_failure, "cycle %d: init=%d cleanup=%d", i, si, sc);
+    if (si || sc) {
+      if (!*first_failure) snprintf(first_failure, sizeof first_failure, "cycle %d: init=%d cleanup=%d", i, si, sc);
+    } else completed++;
     if (i == 0) rss_first = rss_bytes();
   }
   settle(baseline, opt.settle_ms);
-  char extra[400];
+  char extra[420];
   snprintf(extra, sizeof extra,
-           "\"cycles\":%d,\"init_failures\":%d,\"cleanup_failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,"
+           "\"cycles\":%d,\"completed\":%d,\"init_failures\":%d,\"cleanup_failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,"
            "\"rss_last\":%ld,\"threads_before\":%d,\"threads_after\":%d",
-           opt.cycles, init_failures, cleanup_failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
+           opt.cycles, completed, init_failures, cleanup_failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
   done("cycles", NO_STATUS, NULL, extra);
   return 0;
 }
@@ -109,6 +114,7 @@ int scenario_exit_without_cleanup(void) {
   do_init("init", opt.config, 1);
   begin("exiting");
   done("exiting", NO_STATUS, NULL, NULL);
+  end_marker("ok");
   exit(0);
 }
 
@@ -173,7 +179,10 @@ void load_user_model(const char *step) {
   begin(step);
   RuntimeStatus s = rt.load_models(1, &model);
   done(step, s, NULL, NULL);
-  if (s != RUNTIME_STATUS_SUCCESS) exit(EXIT_MODEL);
+  if (s != RUNTIME_STATUS_SUCCESS) {
+    end_marker("model");
+    exit(EXIT_MODEL);
+  }
 }
 
 // A second load_models call after a successful one.

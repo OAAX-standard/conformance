@@ -5,10 +5,12 @@
 // "y" FLOAT [1,4] (= x * scale) and "sum" FLOAT [1]; a request takes 5 ms. Build variants (CMakeLists.txt) cover missing and
 // extra exports. The faults are listed next to the code they change.
 #include <dlfcn.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -19,7 +21,9 @@
 #define INFERENCE_MS 5
 
 static int initialized, cleaned_once, has_error, models_loaded, num_models, load_broken, generation, accepted_total;
-static char error_text[160];
+static char error_text[480];
+static char config_value[160];  // fault echo_config: the runtime repeats the configuration it was given in its error text
+static int first_request_done;
 static const unsigned char *kept_data[MAX_MODELS];  // fault retain_buffer: borrowed instead of copied
 static const char *kept_path[MAX_MODELS];
 
@@ -60,7 +64,8 @@ static void sleep_ms(int ms) {
 
 static RuntimeStatus fail(RuntimeStatus status, const char *message) {
   if (!fault("no_error_text")) {
-    strncpy(error_text, message, sizeof error_text - 1);
+    snprintf(error_text, sizeof error_text, "%s%s%s%s", fault("ctrl_err") ? "\x01\x1b[31m" : "", message, fault("echo_config") ? " config=" : "",
+             fault("echo_config") ? config_value : "");
     has_error = 1;
   }
   return status;
@@ -68,7 +73,7 @@ static RuntimeStatus fail(RuntimeStatus status, const char *message) {
 
 static void *idle_thread(void *arg) {
   (void)arg;
-  pthread_setname_np(pthread_self(), "mock-worker");
+  pthread_setname_np(pthread_self(), fault("bad_thread_name") ? "\xff" "\x01" "bad" : "mock-worker");
   for (;;) pause();
   return NULL;
 }
@@ -87,13 +92,27 @@ EXPORT RuntimeStatus runtime_init(Config config) {
     if (fault("init_twice_ok")) return RUNTIME_STATUS_SUCCESS;
     return fail(RUNTIME_STATUS_ALREADY_INITIALIZED, "already initialized");
   }
-  if (fault("require_config") && config.length == 0) return fail(RUNTIME_STATUS_ERROR, "config required");
+  int has_key = 0;
+  for (int i = 0; i < config.length; i++) {
+    has_key |= !strcmp(config.keys[i], "vendor_key");  // fault require_config: the runtime cannot start without this vendor key
+    if (fault("echo_config")) snprintf(config_value, sizeof config_value, "%s", config.values[i]);
+  }
+  if (fault("require_config") && !has_key) return fail(RUNTIME_STATUS_ERROR, "config required");
+  if (fault("slow_init")) sleep_ms(2500);
+  if (fault("chatty")) {
+    for (int i = 0; i < 400; i++) fprintf(stderr, "mock runtime: noisy line %03d ......................................................\n", i);
+    fflush(stderr);
+  }
+  if (fault("daemonize") && fork() == 0) {  // a helper process that keeps the inherited stdout/stderr open
+    sleep(300);
+    _exit(0);
+  }
   for (int i = 0; i < config.length; i++)
     if (fault("reject_unknown_key") && !strcmp(config.keys[i], "oaax_conformance_unknown_key"))
       return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "unknown key");
   if (cleaned_once && fault("no_reinit")) return fail(RUNTIME_STATUS_ERROR, "cannot re-initialize");
 
-  if (fault("leak_thread")) {
+  if (fault("leak_thread") || fault("bad_thread_name")) {
     pthread_t t;
     pthread_create(&t, NULL, idle_thread, NULL);
     pthread_detach(t);
@@ -105,6 +124,7 @@ EXPORT RuntimeStatus runtime_init(Config config) {
   }
   initialized = 1;
   load_broken = 0;
+  first_request_done = 0;
   if (!fault("stale_error")) has_error = 0;  // a successful call leaves no error behind
   return RUNTIME_STATUS_SUCCESS;
 }
@@ -121,6 +141,7 @@ static void drop_queue(void) {
 
 EXPORT RuntimeStatus runtime_cleanup(void) {
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
+  if (!initialized && cleaned_once && fault("cleanup_twice_fails")) return fail(RUNTIME_STATUS_ERROR, "already cleaned up");
   pthread_mutex_lock(&lock);
   if (queued && fault("cleanup_fails_inflight")) {
     pthread_mutex_unlock(&lock);
@@ -153,6 +174,8 @@ static int valid_model(const ModelConfig *m) {
 EXPORT RuntimeStatus runtime_load_models(int count, const ModelConfig *configs) {
   if (!initialized) return not_initialized();
   if (count < 1 || count > MAX_MODELS || !configs) return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "no model given");
+  if (fault("exit_in_call")) exit(3);  // a runtime that ends the process from inside a call
+  if (fault("one_model") && count > 1) return fail(RUNTIME_STATUS_OUT_OF_MEMORY, "the device holds one model at a time");
   if (models_loaded && !fault("load_twice_ok")) return fail(RUNTIME_STATUS_ALREADY_INITIALIZED, "models are already loaded");
   if (load_broken) return fail(RUNTIME_STATUS_ERROR, "a failed load left the runtime unusable");  // fault load_sticky_failure
   for (int i = 0; i < count; i++) {
@@ -161,6 +184,7 @@ EXPORT RuntimeStatus runtime_load_models(int count, const ModelConfig *configs) 
     if (fault("load_error_generic")) return fail(RUNTIME_STATUS_ERROR, "failed to load the model");
     if (!configs[i].model_data && access(configs[i].file_path, R_OK)) {
       if (fault("load_sticky_failure")) load_broken = 1;
+      if (fault("weird_status")) return fail((RuntimeStatus)99, "a status the header does not define");
       return fail(RUNTIME_STATUS_FILE_NOT_FOUND, "model file not found");
     }
     if (!valid_model(&configs[i])) return fail(RUNTIME_STATUS_INVALID_MODEL, "not a model");
@@ -195,15 +219,21 @@ static RuntimeStatus validate(const Tensors *t, const char **why) {
     if (t->num_tensors == 1 ? fault("accept_missing") : fault("accept_unknown_name")) return RUNTIME_STATUS_SUCCESS;
     return (*why = "missing or unknown input"), RUNTIME_STATUS_INVALID_TENSOR;
   }
+  if (fault("u8_only")) {  // takes uint8 pixels where the ONNX model has floats
+    if (x->data_type != DATA_TYPE_UINT8) return (*why = "x must be UINT8"), RUNTIME_STATUS_TENSOR_TYPE_MISMATCH;
+    return RUNTIME_STATUS_SUCCESS;
+  }
+  if (fault("any_shape")) return RUNTIME_STATUS_SUCCESS;  // every dimension dynamic
   if (x->data_type != DATA_TYPE_FLOAT || scale->data_type != DATA_TYPE_FLOAT) {
     if (fault("accept_wrong_dtype")) return RUNTIME_STATUS_SUCCESS;
     return (*why = "wrong data type"), fault("type_code_generic") ? RUNTIME_STATUS_ERROR : RUNTIME_STATUS_TENSOR_TYPE_MISMATCH;
   }
-  if (x->rank != 2 || x->shape[0] != 1 || x->shape[1] != 4 || scale->rank != 1 || scale->shape[0] != 1) {
+  int dim0_ok = fault("dynamic_dim0") ? x->shape[0] >= 1 : x->shape[0] == 1;  // fault dynamic_dim0: the first dimension takes any size
+  if (x->rank != 2 || !dim0_ok || x->shape[1] != 4 || scale->rank != 1 || scale->shape[0] != 1) {
     if (fault("accept_wrong_shape")) return RUNTIME_STATUS_SUCCESS;
     return (*why = "wrong shape"), fault("shape_code_generic") ? RUNTIME_STATUS_ERROR : RUNTIME_STATUS_TENSOR_SHAPE_MISMATCH;
   }
-  if (x->data_size != 16 || scale->data_size != 4) {
+  if (x->data_size != (size_t)(x->shape[0] * 16) || scale->data_size != 4) {
     if (fault("accept_bad_size")) return RUNTIME_STATUS_SUCCESS;
     return (*why = "data_size does not match shape and type"), RUNTIME_STATUS_INVALID_TENSOR;
   }
@@ -225,7 +255,9 @@ static void free_input(Tensors *t) {
 // Does the request really match the model? (a fault can let a request through that does not)
 static int usable(const Tensors *t) {
   const TensorDescriptor *x = t ? find(t, "x") : NULL, *scale = t ? find(t, "scale") : NULL;
-  return x && scale && x->data_type == DATA_TYPE_FLOAT && x->rank == 2 && x->shape[1] == 4 && x->data_size == 16 && scale->data_size == 4;
+  if (!x || !scale) return 0;
+  if (fault("u8_only") || fault("any_shape")) return x->rank == 2 && x->shape[1] == 4 && x->data_size >= 4;
+  return x->data_type == DATA_TYPE_FLOAT && x->rank == 2 && x->shape[1] == 4 && x->data_size == (size_t)(x->shape[0] * 16) && scale->data_size == 4;
 }
 
 EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
@@ -253,12 +285,19 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     r = calloc(1, sizeof *r);
     r->id = input->id;
     r->model_id = fault("wrong_model_id") ? 0 : model_id;
-    const float *x = find(input, "x")->data, scale = *(const float *)find(input, "scale")->data;
-    for (int i = 0; i < 4; i++) r->y[i] = x[i] * scale, r->sum += r->y[i];
+    const TensorDescriptor *xd = find(input, "x");
+    float scale = fault("u8_only") || fault("any_shape") ? 1.0f : *(const float *)find(input, "scale")->data;
+    for (int i = 0; i < 4; i++) {
+      float xi = xd->data_type == DATA_TYPE_UINT8 ? ((const unsigned char *)xd->data)[i] : ((const float *)xd->data)[i];
+      r->y[i] = xi * scale;
+      r->sum += r->y[i];
+    }
+    if (fault("jitter")) r->y[1] += 1e-7f * (float)(input->id % 5);  // below the comparison tolerance
     static int corrupt_count;
     if (fault("corrupt_every_7th") && ++corrupt_count % 7 == 0) r->y[0] += 1.0f;
     if (fault("wrong_output")) r->y[0] += 1.0f;
-    r->ready_ms = now_ms() + INFERENCE_MS;
+    r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0);
+    first_request_done = 1;
   }
   pthread_mutex_lock(&lock);
   accepted_total++;
@@ -276,7 +315,11 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
 }
 
 static void fill_descriptor(TensorDescriptor *d, const char *name, int rank, int n, const float *values) {
-  d->name = fault("output_null_name") && !strcmp(name, "y") ? NULL : strdup(fault("rename_output") ? "out" : name);
+  if (fault("huge_name") && !strcmp(name, "y")) {  // a 40000-byte tensor name
+    d->name = malloc(40001);
+    memset(d->name, 'n', 40000);
+    d->name[40000] = 0;
+  } else d->name = fault("output_null_name") && !strcmp(name, "y") ? NULL : strdup(fault("rename_output") ? "out" : name);
   d->data_type = DATA_TYPE_FLOAT;
   d->rank = rank;
   d->shape = malloc(rank * sizeof(int));
@@ -299,6 +342,7 @@ static Tensors *make_output(const struct Request *r) {
     t->tensors[1].data = t->tensors[0].data;  // two descriptors, one buffer: the host would free it twice
   }
   if (fault("bad_data_size")) t->tensors[0].data_size = 8;
+  if (fault("big_size")) t->tensors[0].data_size = 1600000;  // claims far more than it allocated
   return t;
 }
 
@@ -391,5 +435,5 @@ EXPORT int mock_extra_symbol(void) { return 1; }
 #endif
 
 __attribute__((destructor)) static void at_exit(void) {
-  if (initialized && fault("crash_at_exit")) abort();
+  if ((initialized && fault("crash_at_exit")) || fault("crash_after_end")) abort();
 }
