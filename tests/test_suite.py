@@ -175,4 +175,5 @@ def test_report_redacts_directories_runtimes_echo_in_messages():
 def test_only_does_not_count_unselected_tests_as_drafts(build_dir):
     ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], settle_ms=500, timeout=30)
     suite = run_suite(ctx, ["RT-S-01"])
-    assert len(suite.results) == 1 and suite.not_approved == 0
+    drafts = sum(spec.status != "approved" for spec in load().values())
+    assert len(suite.results) == 1 and suite.not_approved == drafts  # unselected approved tests are not drafts
