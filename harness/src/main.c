@@ -29,7 +29,7 @@ const struct { const char *name; int (*run)(void); } SCENARIOS[] = {
 // ---- main ---------------------------------------------------------------------------------------------------
 
 static int usage(void) {
-  fprintf(stderr, "usage: oaax-harness <scenario> <library> --out FILE [-c key=value]... [-m MODEL] [-i name:DTYPE:dims]... [--cycles N] [--settle-ms N] [--dump DIR] [...]\n");
+  fprintf(stderr, "usage: oaax-harness <scenario> <library> --out FILE [-c key=value]... [-m MODEL] [-i name:DTYPE:dims]... [--budget-ms N] [--cycles N] [--settle-ms N] [--dump DIR] [...]\n");
   return EXIT_USAGE;
 }
 
@@ -53,6 +53,8 @@ static int parse(int argc, char **argv) {
     else if (!strcmp(argv[i], "--model-cycles") && has_value) opt.model_cycles = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--timeout-ms") && has_value) opt.timeout_ms = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--lost-after-ms") && has_value) opt.lost_after_ms = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "--budget-ms") && has_value) opt.budget_ms = atoi(argv[++i]);
+    else if (!strcmp(argv[i], "--warmup-ms") && has_value) opt.warmup_ms = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-i") && has_value) {
       if (opt.num_inputs >= 16 || !parse_input(argv[++i], &opt.inputs[opt.num_inputs++])) return usage();
     }
@@ -75,11 +77,18 @@ int main(int argc, char **argv) {
     perror(opt.out);
     return EXIT_USAGE;
   }
+  out_of_time(0);  // starts the clock of the time budget
   rc = load_library();
-  if (rc) return rc;
+  if (rc) {
+    end_marker(rc == EXIT_DLOPEN ? "dlopen" : "symbols");
+    return rc;
+  }
   for (size_t i = 0; i < sizeof SCENARIOS / sizeof SCENARIOS[0]; i++)
-    if (!strcmp(opt.scenario, SCENARIOS[i].name)) return SCENARIOS[i].run();
+    if (!strcmp(opt.scenario, SCENARIOS[i].name)) {
+      rc = SCENARIOS[i].run();
+      end_marker("ok");
+      return rc;
+    }
   fprintf(stderr, "unknown scenario: %s\n", opt.scenario);
   return EXIT_USAGE;
 }
-

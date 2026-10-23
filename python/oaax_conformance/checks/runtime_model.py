@@ -1,7 +1,7 @@
 """RT-M: tests that send requests (--model). Specs: docs/tests/runtime-model.md"""
 import json
 
-from ..harness import STATUS_NAMES
+from ..harness import status_name
 from ..registry import Blocked, Fail, NotApplicable, check
 
 SUCCESS, NO_OUTPUT_AVAILABLE = 0, 12
@@ -10,8 +10,8 @@ MAX_CYCLE_RSS_GROWTH = 5 * 1024 * 1024
 MAX_REQUEST_RSS_GROWTH = 10 * 1024 * 1024
 
 
-def _name(status: int) -> str:
-    return f"{STATUS_NAMES[status]} ({status})" if 0 <= status < len(STATUS_NAMES) else str(status)
+_name = status_name
+REJECTED_VALID = (TENSOR_TYPE_MISMATCH, TENSOR_SHAPE_MISMATCH, 9)  # TYPE, SHAPE, INVALID_TENSOR: "this is not what I take"
 
 
 def _scenario(ctx, name: str):
@@ -23,8 +23,14 @@ def _scenario(ctx, name: str):
 def _answered(run, step: str) -> dict:
     """A round trip step that must have worked: the request was accepted and its output came back."""
     obs = run.step(step)
-    if obs.get("enqueue", SUCCESS) != SUCCESS or obs["status"] != SUCCESS:
-        raise Fail(f"{step}: the request was not answered (enqueue {_name(obs.get('enqueue', 0))}, retrieve {_name(obs['status']) if obs['status'] is not None else 'not reached'})")
+    enqueue = obs.get("enqueue", SUCCESS)
+    if enqueue in REJECTED_VALID:
+        # the suite cannot tell a runtime that takes another type/layout from one that is wrong: it cannot judge, so it does not blame
+        raise Blocked(f"{step}: the runtime rejected the request built from the model's own I/O ({_name(enqueue)}): it probably takes another data type "
+                      "or layout than the ONNX model. Give what it takes with --input NAME:DTYPE:DIMS, or an oaax-manifest.json next to the model")
+    if enqueue != SUCCESS or obs["status"] != SUCCESS:
+        got = _name(obs["status"]) if obs["status"] is not None else "not reached"
+        raise Fail(f"{step}: the request was not answered (enqueue {_name(enqueue)}, retrieve {got})")
     return obs
 
 
@@ -80,6 +86,8 @@ def model_id_is_the_index(ctx):
     _established(ctx)
     run = ctx.run("model-load")
     status = run.step("load_two")["status"]
+    if status in (8, 14, 16):  # OUT_OF_MEMORY, NOT_IMPLEMENTED, DEVICE_ERROR: the device holds one model at a time
+        raise NotApplicable(f"the runtime cannot hold two models at once ({_name(status)})")
     if status != SUCCESS:
         raise Fail(f"loading two models in one call returned {_name(status)}")
     bad = []
@@ -91,10 +99,14 @@ def model_id_is_the_index(ctx):
         raise Fail("; ".join(bad))
 
 
+SKIPPED = {"missing_input": "the model has a single input: there is no input to leave out",
+           "wrong_shape": "every dimension of the model's inputs is dynamic (or the input is a scalar): no shape is wrong"}
+
+
 def _rejected(run, step: str) -> dict:
     obs = run.step(step)
     if obs.get("skipped"):
-        raise NotApplicable("the model has a single input: there is no input to leave out")
+        raise NotApplicable(SKIPPED.get(step, "not applicable to this model"))
     return obs
 
 
@@ -288,9 +300,10 @@ def rejected_input_is_intact(ctx):
             touched.append(step)
     if touched:
         raise Fail("the runtime changed or freed the input it rejected (cases: " + ", ".join(touched) + ")")
-    if run.returncode < 0 and not run.timed_out and not run.crashed_in:
-        # the harness frees a rejected input itself: dying there means the runtime had already freed it
-        raise Fail(f"the process died ({run.signal_name or 'exit ' + str(run.returncode)}) right after a rejected request: the runtime had freed an input that is the caller's")
+    if run.returncode < 0 and not run.timed_out and not run.crashed_in and run.end is None:
+        # the harness frees a rejected input itself: dying there, before it wrote its end marker, means the runtime had already freed it.
+        # (A crash after the marker is something else: a static destructor, see RT-L-11.)
+        raise Fail(f"the process died ({run.signal_name}) right after a rejected request: the runtime had freed an input that is the caller's")
 
 
 @check("RT-M-28")
@@ -323,8 +336,8 @@ def concurrent_producers(ctx):
 @check("RT-M-30")
 def concurrent_results_are_intact(ctx):
     obs = _concurrency(ctx)
-    if obs["bad_hash"]:
-        raise Fail(f"{obs['bad_hash']} outputs differ from the output of the same input run alone")
+    if obs["mismatch"]:
+        raise Fail(f"{obs['mismatch']} outputs differ from the output of the same input run alone (floats compared within 1e-4 relative)")
 
 
 @check("RT-M-31")
@@ -353,6 +366,8 @@ def blocked_retrieve_wakes_up(ctx):
 def flooding(ctx):
     obs = _scenario(ctx, "flood").step("flood")
     problems = []
+    if obs["requests"] < 10:
+        raise Blocked(f"too slow: only {obs['requests']} of {obs['requested']} requests fit the time budget (raise --timeout)")
     if obs["accepted"] + obs["rejected"] != obs["requests"]:
         problems.append("not every enqueue_input call returned")
     if obs["answered"] != obs["accepted"]:
@@ -397,6 +412,8 @@ def info_follows_the_state(ctx):
 @check("RT-M-35")
 def cycles_with_a_model(ctx):
     obs = _scenario(ctx, "model-cycles").step("model_cycles")
+    if obs["completed"] + obs["failures"] < 3 and obs["cycles"] >= 3:
+        raise Blocked(f"too slow to repeat: only {obs['completed']} of {obs['cycles']} cycles fit the time budget (raise --timeout)")
     problems = []
     if obs["failures"]:
         problems.append(obs["first_failure"])
@@ -412,6 +429,8 @@ def cycles_with_a_model(ctx):
 @check("RT-M-36")
 def accepted_inputs_are_freed(ctx):
     obs = _scenario(ctx, "leak-requests").step("leak")
+    if obs["completed"] < 30 and obs["requests"] >= 30 and not obs["failures"]:
+        raise Blocked(f"too slow to measure: only {obs['completed']} of {obs['requests']} requests fit the time budget (raise --timeout)")
     if obs["failures"]:
         raise Fail(f"{obs['failures']} of the requests failed")
     growth = obs["rss_after"] - obs["rss_before"]

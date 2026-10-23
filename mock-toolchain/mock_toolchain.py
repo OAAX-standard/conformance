@@ -57,6 +57,14 @@ def validate(data: bytes) -> str | None:
 
 
 def extract_archive(path: str, out: str) -> int:
+    if fault("zipslip_tmp"):  # extracts under /tmp inside the container: the members climb out into /tmp, where no mount can see them
+        with zipfile.ZipFile(path) as z:
+            for member in z.namelist():
+                target = os.path.join("/tmp/work/extract", member)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "wb") as f:
+                    f.write(z.read(member))
+        return fail(out, "archives are not supported")
     if not fault("zip_slip"):
         return fail(out, "archives are not supported")
     os.makedirs(out, exist_ok=True)
@@ -97,6 +105,8 @@ def main(argv: list[str]) -> int:
     path, out = argv[0], argv[-1]
     if fault("fail_always"):
         return fail(out, "failing on purpose")
+    if fault("hang"):
+        time.sleep(600)
     if fault("needs_root") and os.getuid() != 0:
         return fail(out, "must run as root")
     if fault("needs_network"):
@@ -136,13 +146,20 @@ def main(argv: list[str]) -> int:
         return 0 if fault("unwritable_ok") else fail(out, f"cannot create the output directory: {e}")
     if fault("writes_input_dir"):
         open(path + ".cache", "w").close()
+    model_name = "model.hef" if fault("vendor_format") else "model.bin"  # a vendor format, and (see below) no manifest to describe it
     if not fault("no_model"):
-        with open(os.path.join(out, "model.bin"), "wb") as f:
+        with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("subdirs"):  # subdirectories created as the uid the container runs as
+        os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
+        open(os.path.join(out, "sub", "deep", "file"), "w").close()
     write_log(out, True, "converted")
-    io = None if fault("no_manifest") else describe(data, out)
+    io = None if fault("no_manifest") or fault("vendor_format") else describe(data, out)
     if io:
         doc = {"schema": "oaax-manifest/1", "oaax_version": "2.1", "model_file": "model.bin", "precision": "FP32", "equivalent": True, **io}
+        if fault("raw_heads"):  # the runtime returns something else than the ONNX outputs: declared honestly
+            doc["equivalent"] = False
+            doc["outputs"] = [{"name": "head0", "native": {"dtype": "FLOAT", "shape": [1, 8], "layout": "XX"}}]
         with open(os.path.join(out, "oaax-manifest.json"), "w") as f:
             json.dump(tamper(doc), f)
     if fault("no_perm"):

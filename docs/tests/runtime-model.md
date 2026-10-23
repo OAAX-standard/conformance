@@ -10,12 +10,16 @@ Probed = the C++ CPU runtime (reference implementation build, 2.0.0), run by han
 `oaax-conformance runtime LIB --model FILE`. Without `--model` every test here is `BLOCKED`; if the runtime cannot load the model they are
 `BLOCKED` too, never failed.
 
-Tests that send inputs must know what the model takes (names, data types, shapes). The suite gets that from, in this order:
+Tests that send inputs must know what the model takes (names, data types, shapes). The suite takes it from, in this order:
 
-1. an `oaax-manifest.json` next to the model (the toolchain output described in the 2.1 manifest proposal), using the `native` view;
-2. otherwise, for an `.onnx` model, the ONNX file itself (`pip install oaax-conformance[onnx]`);
-3. otherwise `--input NAME:DTYPE:DIMS` for every input (repeatable);
-4. otherwise the inference tests are `BLOCKED` ("cannot tell what the model takes").
+1. `--input NAME:DTYPE:DIMS` for every input (repeatable; `?` for a dynamic dimension): an explicit choice always wins, and the way to describe a
+   runtime that takes another data type or layout than the ONNX model (for example uint8 `NHWC` pixels for a float `NCHW` model);
+2. an `oaax-manifest.json` next to the model (the toolchain output described in the 2.1 manifest proposal), using the `native` views;
+3. for an `.onnx` model, the ONNX file itself (`pip install -e ".[onnx]"` from a checkout);
+4. otherwise the tests that send requests are `BLOCKED` ("cannot tell what the model takes").
+
+If the runtime rejects the very first request built from the model's own I/O with a type or shape mismatch, the suite cannot tell a wrong runtime from
+a runtime that takes another form: those tests are `BLOCKED` with a hint to use `--input` or a manifest, never failed.
 
 `--hardware-safe` (few cycles, small floods, a pause between scenarios) is for shared or fragile devices. A test that does not apply to the model
 (RT-M-20 on a one-input model) is reported `N/A`.
@@ -27,10 +31,10 @@ behaviour, never accuracy (accuracy against the ONNX reference is the end-to-end
 
 | ID | Check | Pass when | Level | Source | Probed | Status |
 | -- | ----- | --------- | ----- | ------ | ------ | ------ |
-| RT-M-01 | Second `load_models` | after a successful `load_models`, another call returns an error status (no crash); the runtime reports `ALREADY_INITIALIZED` today | PROPOSED | none: the header says loaded models are maintained "until runtime_cleanup()" but not what a later call does; models are replaced only by `cleanup` + `init` | pass | approved |
+| RT-M-01 | Second `load_models` | after a successful `load_models`, another call returns an error status (no crash); the runtime reports `ALREADY_INITIALIZED` today | PROPOSED | none (**decided for 2.1: a later `load_models` is an error**; the status stays `ALREADY_INITIALIZED` unless 2.1 adds a dedicated one): the header says loaded models are maintained "until runtime_cleanup()" but not what a later call does; models are replaced only by `cleanup` + `init` | pass | approved |
 | RT-M-02 | Retry after a failed load | `load_models` with a missing file fails; a second call with the real model then succeeds without a new `init`, and inference works | MUST | header: "If a model fails to load, the caller can retry loading another config of models without having to re-call the runtime_init function"; "Must free all resources allocated during the call if any model fails to load" | pass | approved |
 | RT-M-03 | Load from memory | `load_models` with `model_data` + `model_size` (no `file_path`) succeeds and a request is answered | MUST | header: "Either file_path or model_data/model_size must be provided to load the model"; spec: "from a file path or from memory" | pass | approved |
-| RT-M-04 | Buffers are copied | after `load_models` the harness overwrites `model_data` and the path and config strings; a request is still answered | MUST | header: "Mustn't assume that the model_configs array, or any buffer it points to ... is accessible and valid after the call. Anything it needs later must be copied" | pass for `model_data`; path and config strings not probed | approved |
+| RT-M-04 | Buffers are copied | after `load_models` the harness overwrites `model_data` and the `file_path` string; a request is still answered | MUST | header: "Mustn't assume that the model_configs array, or any buffer it points to ... is accessible and valid after the call. Anything it needs later must be copied" | pass (`model_data` and `file_path`) | approved |
 | RT-M-05 | Model id is the array index | two models loaded in one call (the same file twice): a request sent to id 0 and one to id 1 come back with `*model_id` 0 and 1 | MUST | header: "Models are identified by their index in the array (0, 1, 2, ...)"; "Must write the model that produced the output to *model_id" | pass | approved |
 | RT-M-06 | Invalid model id | `enqueue_input` with id -1 and with id = number of loaded models returns an error status (no crash) | MUST | header: "Must validate model_id is within valid range and corresponds to a loaded model" | pass | approved |
 | RT-M-07 | Invalid model id: code | the status of RT-M-06 is `INVALID_MODEL_ID` | SHOULD | the status exists in the header; the text does not say when to use it | pass (18) | approved |
@@ -69,7 +73,7 @@ disappears.
 | RT-M-22 | Wrong data type: code | the status of RT-M-21 is `TENSOR_TYPE_MISMATCH` | SHOULD | the status exists in the header; the text does not say when to use it | not applicable (accepted) | approved |
 | RT-M-23 | Wrong shape | a tensor whose shape differs from the model's (for example `NHWC` for an `NCHW` input) is rejected | MUST | same as RT-M-21 | **FAIL**: SUCCESS, the request is lost | approved |
 | RT-M-24 | Wrong shape: code | the status of RT-M-23 is `TENSOR_SHAPE_MISMATCH` | SHOULD | same as RT-M-22 | not applicable (accepted) | approved |
-| RT-M-25 | Inconsistent `data_size` | a tensor whose `data_size` is smaller than shape times element size is rejected (otherwise the runtime reads past the buffer) | MUST | header: "Must validate input_tensors structure and all its fields"; the host must keep `data_size` "consistent with its data buffer" | **FAIL**: SUCCESS and an output; valgrind reports 257,702 invalid reads with a half-size `data_size` and 0 with the correct one: the runtime reads past the buffer | approved |
+| RT-M-25 | Inconsistent `data_size` | a tensor whose `data_size` is smaller than shape times element size is rejected (otherwise the runtime reads past the buffer) | MUST | header: "Must validate input_tensors structure and all its fields"; the host must keep `data_size` "consistent with its data buffer" | **FAIL**: SUCCESS and an output. (A manual probe with a buffer really half the size, not the declared size the suite uses, made valgrind report 257,702 invalid reads against 0 for the correct size: the runtime trusts the shape, not `data_size`.) | approved |
 | RT-M-26 | Unknown tensor name | a tensor named like no input of the model is rejected (right type and shape) | PROPOSED | none: the 2.0 text does not say inputs are matched by name | **FAIL**: SUCCESS, the request is lost | approved |
 | RT-M-27 | Rejected input is left intact | after any rejection of RT-M-06 and RT-M-18 to RT-M-26 the harness still reads the tensors it filled with a pattern, unchanged, and frees them | MUST | header: "Must not free input_tensors memory if function fails for any reason"; "the caller is responsible for freeing the input_tensors structure" | pass (model id rejection) | approved |
 | RT-M-28 | Still usable | after all the rejections above, a valid request is answered | SHOULD | derived: nothing in the text allows a rejected call to break the runtime | pass | approved |
@@ -83,7 +87,7 @@ disappears.
 | RT-M-31 | Cleanup with requests in flight | `cleanup` with 20 unretrieved requests returns SUCCESS within 10 s; `init` works again | MUST | header: "Must clean up any pending input that hasn't been processed yet"; "Must clean up any pending output that hasn't been retrieved yet" | pass (7 ms) | approved |
 | RT-M-32 | Blocked retrieve wakes up | a thread blocked in `retrieve_output(-1)` returns, with any status, within 5 s of `cleanup` called from another thread | PROPOSED | none: the 2.0 text does not say | not probed | approved |
 | RT-M-33 | Flooding | 1000 `enqueue_input` calls without retrieving: every call returns promptly; each accepted request is answered exactly once; a rejected one stays the caller's | PROPOSED | none: the text has no queue capacity or "full" status | not probed | approved |
-| RT-M-34 | Info follows the state | `get_info` fields that are present are right: `loaded_models` equals the number of loaded models, `requests_in_flight` equals the requests accepted and not yet retrieved and is 0 when idle | SHOULD | header: "Must update the returned information to reflect the current runtime state on each call" (the fields themselves are optional) | pass (`loaded_models` 2, `requests_in_flight` 0 idle) | approved |
+| RT-M-34 | Info follows the state | `get_info` fields that are present are right: `loaded_models` equals the number of loaded models, `requests_in_flight` equals the requests accepted and not yet retrieved and is 0 when idle | SHOULD | header: "Must update the returned information to reflect the current runtime state on each call" (the fields themselves are optional) | **WARN**: `loaded_models` is right; `requests_in_flight` is 1 where 3 requests are unretrieved (it seems to count only the ones still running) | approved |
 | RT-M-35 | Cycles with a model | 20 x (`init`, `load_models`, 10 requests, `cleanup`): no failure, threads back to baseline, RSS grows by less than 5 MB after the first cycle | SHOULD | derived: "Must free all runtime-allocated memory and resources" | not probed | approved |
 | RT-M-36 | Accepted inputs are freed | 500 sequential requests: RSS grows by less than 10 MB | SHOULD | derived: header: "Must free all memory associated with input_tensors after inference completes" | not probed | approved |
 

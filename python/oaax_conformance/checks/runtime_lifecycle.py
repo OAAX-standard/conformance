@@ -2,7 +2,7 @@
 import json
 from collections import Counter
 
-from ..harness import STATUS_NAMES
+from ..harness import status_name
 from ..registry import Blocked, Fail, check
 
 SUCCESS, ALREADY_INITIALIZED = 0, 3
@@ -16,7 +16,7 @@ def _status(run, step: str) -> int:
 def _expect_status(run, step: str, expected: int, what: str) -> None:
     status = run.step(step)["status"]
     if status != expected:
-        raise Fail(f"{what} returned {STATUS_NAMES[status]} ({status}), expected {STATUS_NAMES[expected]} ({expected})")
+        raise Fail(f"{what} returned {status_name(status)}, expected {status_name(expected)}")
 
 
 @check("RT-L-01")
@@ -71,9 +71,17 @@ def info_after_cleanup(ctx):
         raise Fail("runtime_get_info() is not NULL after cleanup")
 
 
+def _cycles(ctx) -> dict:
+    """The cycles scenario, or Blocked when the device was too slow for the time budget to fit enough cycles to judge anything."""
+    cycles = ctx.run("cycles").step("cycles")
+    if cycles["completed"] + cycles["init_failures"] + cycles["cleanup_failures"] < 3 and cycles["cycles"] >= 3:
+        raise Blocked(f"too slow to repeat: only {cycles['completed']} of {cycles['cycles']} init/cleanup cycles fit the time budget (raise --timeout)")
+    return cycles
+
+
 @check("RT-L-07")
 def reinit_cycles(ctx):
-    cycles = ctx.run("cycles").step("cycles")
+    cycles = _cycles(ctx)
     if cycles["init_failures"] or cycles["cleanup_failures"]:
         raise Fail(cycles["first_failure"])
 
@@ -81,7 +89,7 @@ def reinit_cycles(ctx):
 @check("RT-L-08")
 def threads_after_cleanup(ctx):
     run = ctx.run("lifecycle")
-    before, after = Counter(run.step("threads_baseline")["threads"]), Counter(run.step("threads_after_cleanup")["threads"])
+    before, after = Counter(run.thread_names("threads_baseline")), Counter(run.thread_names("threads_after_cleanup"))
     left = {n: c for n, c in (after - before).items() if n not in ctx.ignore_threads}
     if left:
         raise Fail(f"{sum(left.values())} thread(s) still running after cleanup: {', '.join(sorted(left))} (excuse driver threads with --ignore-thread)")
@@ -95,12 +103,12 @@ def library_unloads(ctx):
 
 @check("RT-L-10")
 def no_memory_growth(ctx):
-    cycles = ctx.run("cycles").step("cycles")
+    cycles = _cycles(ctx)
     if cycles["rss_first"] < 0 or cycles["rss_last"] < 0:
         raise Blocked("RSS not readable on this platform")
     growth = cycles["rss_last"] - cycles["rss_first"]
     if growth > MAX_RSS_GROWTH:
-        raise Fail(f"RSS grew {growth / 1048576:.1f} MB over {cycles['cycles']} init/cleanup cycles (limit {MAX_RSS_GROWTH // 1048576} MB)")
+        raise Fail(f"RSS grew {growth / 1048576:.1f} MB over {cycles['completed']} init/cleanup cycles (limit {MAX_RSS_GROWTH // 1048576} MB)")
 
 
 @check("RT-L-11")
@@ -114,6 +122,14 @@ def exit_without_cleanup(ctx):
 
 
 NOT_INITIALIZED, INVALID_ARGUMENT, INVALID_MODEL, FILE_NOT_FOUND = 2, 5, 6, 7
+
+
+@check("RT-L-17")
+def cleanup_twice(ctx):
+    run = ctx.run("lifecycle")
+    for step in ("cleanup", "cleanup_again"):
+        if _status(run, step) != SUCCESS:
+            raise Fail(f"{'the first' if step == 'cleanup' else 'a second'} cleanup after init returned {status_name(_status(run, step))}")
 
 
 @check("RT-L-12")

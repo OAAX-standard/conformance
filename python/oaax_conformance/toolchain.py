@@ -98,6 +98,7 @@ class Conversion:
     input_after: dict
     output: dict  # tree of out/ after the run
     out_path: str  # the output argument, relative to the mount
+    container_changes: list = field(default_factory=list)  # paths added or changed inside the container (docker diff), if it was asked for
 
     signal_name = None
 
@@ -164,13 +165,15 @@ class ToolchainContext:
     runtime_lib: str | None = None
     harness: str | None = None
     init_config: list[str] = field(default_factory=list)
-    runtime_timeout: int = 120
+    runtime_timeout: int = 300
+    warmup_ms: int = 120000  # for the runtime of the E2E tests
     workspaces: list = field(default_factory=list)
     leftovers: list = field(default_factory=list)
     used: list = field(default_factory=list)
     _runs: dict = field(default_factory=dict)
     _inspect: dict | None = None
     _dump: str | None = None
+    progress: bool = False  # print each conversion to stderr as it starts
 
     def runtime_context(self, model_path: str):
         """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""
@@ -181,7 +184,7 @@ class ToolchainContext:
         key = f"runtime:{model_path}"
         if key not in self._runs:
             self._dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
-            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=self._dump)
+            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=self._dump, warmup_ms=self.warmup_ms)
         return self._runs[key]
 
     def model_bytes(self) -> bytes:
@@ -205,10 +208,14 @@ class ToolchainContext:
 
     def convert(self, name: str, *, filename: str = "model.onnx", content: bytes | None = None, out_path: str = "/output/result",
                 user: str | None = None, network: bool = True, read_only_rootfs: bool = False, ro_input: bool = False, ro_output: bool = False,
-                argv: list[str] | None = None, workspace: Workspace | None = None, wait: bool = True) -> "Conversion":
+                argv: list[str] | None = None, workspace: Workspace | None = None, keep_container: bool = False) -> "Conversion":
         """Run the toolchain once. `argv` replaces the two normal arguments (wrong argument counts); `content` is the input file."""
         if name in self._runs:
             return self._runs[name]
+        if self.progress:
+            import sys
+
+            print(f"  converting: {name} ...", file=sys.stderr, flush=True)
         ws = workspace or Workspace.create()
         if ws not in self.workspaces:
             self.workspaces.append(ws)
@@ -218,15 +225,37 @@ class ToolchainContext:
         cmd = self._docker(ws, name, args, user=user, network=network, read_only_rootfs=read_only_rootfs, ro_input=ro_input, ro_output=ro_output)
         before = tree(ws.in_dir)
         started, timed_out = time.monotonic(), False
-        try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=self.timeout)
-            code, out, err = proc.returncode, proc.stdout, proc.stderr
-        except subprocess.TimeoutExpired as e:
-            timed_out, code, out, err = True, -signal.SIGKILL, e.stdout or b"", e.stderr or b""
-            subprocess.run(["docker", "rm", "-f", cmd[cmd.index("--name") + 1]], capture_output=True)
+        container = cmd[cmd.index("--name") + 1]
+        if keep_container:
+            cmd.remove("--rm")  # so that `docker diff` can still list what the toolchain changed inside the container
+        with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+            try:
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file)
+                try:
+                    code = proc.wait(timeout=self.timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out, code = True, -signal.SIGKILL
+                    proc.kill()
+                    proc.wait()
+            except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+                raise
+            if timed_out:
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            out_file.seek(0, 2)
+            out_file.seek(max(0, out_file.tell() - 20000))
+            out = out_file.read()
+            err_file.seek(0, 2)
+            err_file.seek(max(0, err_file.tell() - 20000))
+            err = err_file.read()
+        changes = []
+        if keep_container:
+            diff = subprocess.run(["docker", "diff", container], capture_output=True, text=True).stdout
+            changes = [line[2:] for line in diff.splitlines() if line[:2] in ("A ", "C ")]
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
-                         _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args))
+                         _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
         self._runs[name] = run
         return run
 
@@ -247,8 +276,15 @@ class ToolchainContext:
         return results
 
     def close(self) -> None:
-        """Remove the temporary directories. Anything that cannot be removed is reported, never forced."""
+        """Remove the temporary directories. A toolchain that creates subdirectories as another uid leaves some we cannot delete: open them up
+        from a throwaway container of the same image (limited to that workspace), and report anything that still cannot be removed."""
         for ws in self.workspaces:
+            try:
+                shutil.rmtree(ws.root)
+                continue
+            except OSError:
+                pass
+            self._make_removable(ws)
             try:
                 shutil.rmtree(ws.root)
             except OSError:
@@ -256,6 +292,10 @@ class ToolchainContext:
         self.workspaces.clear()
         if self._dump:
             shutil.rmtree(self._dump, ignore_errors=True)
+
+    def _make_removable(self, ws: Workspace) -> None:
+        cmd = ["docker", "run", "--rm", "--user", "0", "--network", "none", "-v", f"{ws.root}:/w", "--entrypoint", "chmod", self.image, "-R", "a+rwX", "/w"]
+        subprocess.run(cmd, capture_output=True, timeout=120)  # best effort: an image without chmod simply leaves the directory
 
 
 def _result_path(args: list[str]) -> str:

@@ -15,16 +15,18 @@ Probed = the C++ CPU toolchain (`oaax-cpu-toolchain:2.0.0`, reference implementa
 - The end-to-end tests (`E2E-*`) also need `--runtime LIB` (and its `--init-config`): without it they are `BLOCKED`.
 
 Every conversion runs as `docker run --rm --user <uid>:<gid> -v <in>:/input -v <out>:/output IMAGE /input/<file> /output/<dir>`
-in temporary directories; unless a test says otherwise the user is the invoking user. Directories owned by another uid are never created
-(tests that run as an arbitrary uid write into the existing output directory), so nothing needs root to clean up. Temporary directories are
-removed at the end; any that cannot be are listed in the report.
+in temporary directories; unless a test says otherwise the user is the invoking user. The suite itself never creates a directory owned by another
+uid (tests that run as an arbitrary uid write into the existing output directory). A toolchain may still create subdirectories as that uid: at the end
+the suite opens such a directory up from a throwaway container of the same image (`chmod`, limited to that temporary directory) and removes it; anything
+that still cannot be removed is left alone and listed in the report. The suite sets `--user`, `--network`, `--read-only` and the mounts itself:
+`--docker-arg` refuses them. Ctrl-C removes the running container.
 
 ## `TC`: invocation and environment
 
 | ID | Check | Pass when | Level | Source | Probed | Status |
 | -- | ----- | --------- | ----- | ------ | ------ | ------ |
 | TC-01 | Valid model | converting a valid ONNX model exits with code 0 within the time limit (default 15 min) | MUST | spec 6.1: "0: Successful conversion"; checklist: "Process valid ONNX models successfully" | pass (1 s) | approved |
-| TC-02 | Any non-root user | the conversion of TC-01 also succeeds as an arbitrary unprivileged uid (12345) | MUST | spec 2.1: "Must not require root privileges for normal operation" | pass | approved |
+| TC-02 | Any non-root user | the conversion of TC-01 also succeeds as an arbitrary unprivileged uid (12345, no passwd entry, no home directory) | SHOULD | spec 2.1: "Must not require root privileges for normal operation", but the checklist (8.1) says "Preferably, execute without root privileges": the text contradicts itself, so a failure is a warning | pass | approved |
 | TC-03 | No network | the conversion succeeds with `--network none` | MUST | checklist: "Not require network connectivity" | pass | approved |
 | TC-04 | Read-only input | the conversion succeeds when the input directory is mounted read-only | SHOULD | spec 9.3: "Restrict file system access to mounted volumes only"; 2.2: results go to the output directory | **FAIL**: `OSError: Read-only file system: '/input/model-simplified.onnx'` | approved |
 | TC-05 | Writes only to the output | after a conversion the input directory contains exactly what the suite put there | SHOULD | spec 2.2: "the directory where conversion outputs will be written"; 9.3 as TC-04 | **FAIL**: leaves `model-simplified.onnx` next to the input | approved |
@@ -41,7 +43,7 @@ removed at the end; any that cannot be are listed in the report.
 | -- | ----- | --------- | ----- | ------ | ------ | ------ |
 | TC-20 | A model file | the output directory holds at least one non-empty file other than the log | MUST | spec 5.1: "Every successful toolchain execution must produce: 1. Model File" | pass | approved |
 | TC-21 | A conversion log | `conversion-log.json` or `logs.json` exists and is valid JSON | MUST | spec 5.1: "Conversion Log: JSON-formatted processing log. Filename: conversion-log.json or logs.json" | pass (`logs.json`, a JSON array of steps) | approved |
-| TC-22 | Readable outputs | every output file and directory is readable by the user who started the container (checked as another uid than the toolchain's) | MUST | checklist: "Handle file permissions correctly across platforms" | pass (mode 644) | approved |
+| TC-22 | Readable outputs | every output file and directory can be read by the user who started the container: its mode gives read (files) or read and traverse (directories) to others, or it belongs to that user | SHOULD | checklist: "Handle file permissions correctly across platforms" (one vague line, so a failure is a warning) | pass (mode 644) | approved |
 | TC-23 | Bundle manifest | `oaax-manifest.json` is present next to the model | PROPOSED | none: the manifest is planned for 2.1 | **FAIL**: absent | approved |
 | TC-24 | Manifest is valid | the manifest passes the schema and its cross-field rules, and `model_file` names a file of the output directory | PROPOSED | none: 2.1 manifest schema | n/a (absent) | approved |
 | TC-25 | Manifest matches the model | the manifest lists the input and output names of the ONNX model byte for byte, with the same `onnx` dtype and shape (needs the `onnx` extra) | PROPOSED | none: 2.1 manifest; spec 5.1: "Must retain input/output tensor names and shapes of the original ONNX model" | n/a (absent) | approved |
@@ -61,7 +63,7 @@ Each case runs the conversion on a bad input into a fresh, writable output direc
 | TC-36 | No model after a failure | the output directory holds no model file (only the log) after TC-30 to TC-33 | SHOULD | derived: a host takes "the model" from the output directory; spec 5.1 ties the model file to success | pass for TC-31/32/33; TC-30 "succeeds" | approved |
 | TC-37 | Failure is explained | the console output of a failed conversion is not empty | SHOULD | spec 4: "Error Reporting: Human-readable error messages with actionable guidance" | pass | approved |
 | TC-38 | Unwritable output | an output path that cannot be created (read-only mount) exits non-zero | MUST | spec 6.1 as above | pass | approved |
-| TC-39 | Hostile archive | a `.zip` whose member path is `../../escape.txt` leaves nothing outside the input and output directories (a toolchain that does not take archives passes by rejecting it) | SHOULD | spec 9.3: "Input Sanitization: Validate all inputs to prevent security vulnerabilities" | pass (archives are rejected) | approved |
+| TC-39 | Hostile archive | a `.zip` whose member paths climb out of the extraction directory (`../escape-N.txt`) leaves nothing outside it: not in the mounted directories, and nothing new elsewhere in the container's filesystem (`docker diff`); a toolchain that does not take archives passes by rejecting it | SHOULD | spec 9.3: "Input Sanitization: Validate all inputs to prevent security vulnerabilities" | pass (archives are rejected) | approved |
 
 ## `TC`: the image
 

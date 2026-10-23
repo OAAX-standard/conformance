@@ -41,12 +41,15 @@ struct InputSpec {
   size_t elem;  // bytes per element
   int rank;
   int shape[8];
+  int dynamic[8];  // 1 where the model accepts any size (sent as 1)
 };
 
 struct Options {
   const char *scenario, *lib, *out, *model, *dump;
   int cycles, settle_ms;
   int flood, requests, producers, per_producer, model_cycles, timeout_ms, lost_after_ms;  // load sizes: --hardware-safe shrinks them
+  int budget_ms;  // loops stop early once the scenario has used this much time (0 = no limit): a slow device is not a failing one
+  int warmup_ms;  // how long the very first request may take: the other timeouts are scaled from it
   struct InputSpec inputs[16];
   int num_inputs;
   Config config;  // from -c key=value
@@ -56,6 +59,10 @@ extern FILE *out;
 extern void *lib_handle;
 
 void put_hex(const char *s);
+void put_hex_bytes(const char *s, size_t n);
+void end_marker(const char *reason);  // the last line of every run: why the process is about to end (ok, dlopen, symbols, init, model)
+double now_ms(void);
+int out_of_time(double started_ms);   // true once the --budget-ms of the scenario is used up
 void begin(const char *step);
 void done(const char *step, int status, const char *str, const char *extra);
 void thread_names(char *buf, size_t size);

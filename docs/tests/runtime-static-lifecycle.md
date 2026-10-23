@@ -26,7 +26,7 @@ A MUST test that could not run (for example `init` fails without vendor keys) is
 | RT-S-05 | Getters are stable | two calls of each getter return equal strings | MUST | header: "valid for the entire lifetime of the runtime" | not probed | approved |
 | RT-S-06 | Info before `init` | `runtime_get_info()` is NULL | MUST | header: "Must return NULL if the runtime is not initialized" | 4/4 | approved |
 | RT-S-07 | No error yet | in a fresh process `runtime_get_error()` is NULL | MUST | header: "NULL if no error has occurred" | 4/4 | approved |
-| RT-S-08 | Cleanup before `init` | `runtime_cleanup()` returns SUCCESS, twice | MUST | header: "Must be idempotent (safe to call multiple times)" | 4/4 | approved |
+| RT-S-08 | Cleanup before `init` | `runtime_cleanup()` returns SUCCESS, twice | SHOULD | derived: header "Must be idempotent (safe to call multiple times)"; whether a cleanup before any `init` must return SUCCESS is not written (RT-L-17 is the MUST) | 4/4 | approved |
 | RT-S-09 | Calls before `init` | `load_models`, `enqueue_input`, `retrieve_output(timeout 0)` neither crash nor return SUCCESS; the status is `NOT_INITIALIZED`; a rejected input is freed by the harness | SHOULD | header: caller must `init` first (behaviour otherwise unspecified); `NOT_INITIALIZED` exists for this | 3/3 probed (reference CPU, Intel, Hailo) return `NOT_INITIALIZED` for all three calls | approved |
 
 ## `RT-L`: lifecycle (`init` must succeed: needs the device, or the CPU runtime)
@@ -45,16 +45,16 @@ Config for `init` is empty unless the user passes `--init-config key=value` (ven
 | RT-L-08 | Threads | thread count after `cleanup` returns to the count before the first `init` (settle up to 3 s) | SHOULD | derived: header "free all runtime-allocated memory and resources"; a surviving thread pins the DLL on Windows | 4/4 | approved |
 | RT-L-09 | Unload | after `cleanup`, `dlclose` really unloads the library (it is gone from `/proc/self/maps`; Windows: module no longer loaded) | SHOULD | derived, same as RT-L-08; known pitfall: objects pinned by `NODELETE` / `GNU_UNIQUE` | not probed | approved |
 | RT-L-10 | Memory | RSS after 50 cycles grows by less than 5 MB over RSS after the first cycle | SHOULD | derived, same as RT-L-08 | not probed | approved |
-| RT-L-11 | Exit without cleanup | after `init`, the process exits with code 0 within 10 s (no crash or hang in static destructors) | PROPOSED | none: robustness rule | not probed | approved |
-
+| RT-L-11 | Exit without cleanup | after `init`, the process exits with code 0 within 10 s (no crash or hang in static destructors) | PROPOSED | none: robustness rule. **Decided for 2.1: MUST** (a host that exits without cleanup must not crash) | not probed | approved |
 | RT-L-12 | Calls after cleanup | `load_models`, `enqueue_input` and `retrieve_output` after `cleanup` return `NOT_INITIALIZED` (no crash) | PROPOSED | none: the header says the caller "must not call any other runtime functions"; 2.1 should give the case a defined result | 4/4 | approved |
 | RT-L-13 | Missing model file | `load_models` with a path that does not exist returns `FILE_NOT_FOUND` | PROPOSED | none: the status exists in the header but the text never says when to return it | 0/4 (all return `ERROR`) | approved |
 | RT-L-14 | Corrupt model file | `load_models` with a file that is not a model returns `INVALID_MODEL` | PROPOSED | none: same as RT-L-13 | 0/4 (all return `ERROR`) | approved |
 | RT-L-15 | Error cleared | after a failed call, a successful `init` leaves `get_error()` NULL | PROPOSED | none: header says "NULL if no error has occurred" but not when a message goes away | 1/4 (only Hailo clears it) | approved |
 | RT-L-16 | NULL output pointers | `retrieve_output` with `model_id` NULL, and with `output_tensors` NULL, returns `INVALID_ARGUMENT` (no crash) | PROPOSED | none: header: caller "must provide non-NULL pointers"; the result for a violation is not defined | 3/4 (Intel checks state first: `MODEL_NOT_LOADED`) | approved |
+| RT-L-17 | Cleanup twice | after `init`, `cleanup` returns SUCCESS, and a second `cleanup` returns SUCCESS too | MUST | header: "Must be idempotent (safe to call multiple times)" and "Must return RUNTIME_STATUS_SUCCESS if cleanup completes successfully" | pass | approved |
 
 ## Deliberately not tested in 2.0
 
-- `load_models` called twice in one session: needs a loadable model, so it belongs to the model tier (batch 2).
 - A "foreign" model file (valid for another runtime): cannot be tested generically; an ONNX file is valid for ONNX-based runtimes.
-- `get_error` pointer lifetime across threads: needs the concurrency scenarios of the model tier.
+- `get_error` pointer lifetime across threads: needs the concurrency scenarios of the model tier and is undefined in 2.0.
+- (A second `load_models` is RT-M-01, in the model tier.)

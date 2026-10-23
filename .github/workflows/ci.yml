@@ -21,3 +21,15 @@ jobs:
       - run: pip install -e ".[test,onnx,e2e]"
       - run: ./scripts/build.sh
       - run: python -m pytest -n 4 -q
+
+  sanitizers:
+    # the harness under AddressSanitizer + UBSan: memory errors in the harness itself (oversized names, bad sizes, aliasing) must fail the build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[test]"
+      - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build-asan -j
+      - run: OAAX_BUILD_DIR=build-asan ASAN_OPTIONS=detect_leaks=0 python -m pytest -q tests/test_suite.py tests/test_regressions.py -k "clean_mock or default_sizes or oversized or runtime_that_holds or aliased"

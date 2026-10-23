@@ -21,3 +21,4 @@ a MUST that the spec text does not support makes the suite wrong, not the vendor
 
 - [`runtime-static-lifecycle.md`](runtime-static-lifecycle.md): batch 1, runtime without a model.
 - [`runtime-model.md`](runtime-model.md): batch 2, tests that need a model (`--model`).
+- [`toolchain.md`](toolchain.md): batch 3, toolchain images (`TC`) and the converted model in a runtime (`E2E`).

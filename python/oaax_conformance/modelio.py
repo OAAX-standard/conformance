@@ -1,7 +1,8 @@
 """What a model takes and returns: the suite needs it to build valid (and invalid) requests.
 
-Sources, in this order: an oaax-manifest.json next to the model (the `native` views), the ONNX file itself (needs the optional
-`onnx` package), or --input flags. A dynamic dimension (-1, or a symbolic name in ONNX) is sent as 1."""
+Sources: --input flags (explicit, they win), else an oaax-manifest.json next to the model (the `native` views), else the ONNX file itself
+(needs the optional `onnx` package). A dynamic dimension (-1 in a manifest, a symbolic name in ONNX, `?` in --input) is None: requests send 1,
+and no request is built with a "wrong" size for it."""
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,10 +18,13 @@ class NoModelIO(Exception):
 class Tensor:
     name: str
     dtype: str
-    shape: tuple
+    shape: tuple  # ints; None for a dynamic dimension
 
     def arg(self) -> str:
-        return f"{self.name}:{self.dtype}:{','.join(str(d) for d in self.shape)}"
+        return f"{self.name}:{self.dtype}:{','.join('?' if d is None else str(d) for d in self.shape)}"
+
+    def concrete_shape(self) -> tuple:
+        return tuple(1 if d is None else d for d in self.shape)
 
 
 @dataclass(frozen=True)
@@ -35,7 +39,13 @@ def parse_arg(text: str) -> Tensor:
     name, _, dtype = rest.rpartition(":")
     if not name or dtype not in DTYPES:
         raise NoModelIO(f"--input {text!r}: expected NAME:DTYPE:D1,D2 with DTYPE one of {sorted(DTYPES)}")
-    return Tensor(name, dtype, tuple(max(int(d), 1) for d in dims.split(",") if d))
+    try:
+        shape = tuple(None if d == "?" else int(d) for d in dims.split(",") if d)
+    except ValueError:
+        raise NoModelIO(f"--input {text!r}: a dimension must be a whole number, or ? when the model accepts any size")
+    if any(d is not None and d < 1 for d in shape):
+        raise NoModelIO(f"--input {text!r}: dimensions must be at least 1 (use ? for a dynamic one)")
+    return Tensor(name, dtype, shape)
 
 
 def _from_manifest(path: Path, model: Path) -> ModelIO | None:
@@ -43,7 +53,7 @@ def _from_manifest(path: Path, model: Path) -> ModelIO | None:
         doc = json.loads(path.read_text())
         if doc.get("model_file") != model.name:
             return None
-        view = lambda t: Tensor(t["name"], t["native"]["dtype"], tuple(max(d, 1) for d in t["native"]["shape"]))  # noqa: E731
+        view = lambda t: Tensor(t["name"], t["native"]["dtype"], tuple(None if d < 1 else d for d in t["native"]["shape"]))  # noqa: E731
         return ModelIO(tuple(view(t) for t in doc["inputs"]), tuple(view(t) for t in doc["outputs"]))
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -54,12 +64,15 @@ def _from_onnx(model: Path) -> ModelIO:
         import onnx
     except ImportError:
         raise NoModelIO("cannot read the ONNX model: pip install oaax-conformance[onnx], or use --input")
-    graph = onnx.load(str(model), load_external_data=False).graph
+    try:
+        graph = onnx.load(str(model), load_external_data=False).graph
+    except Exception as e:  # noqa: BLE001 - a missing file, a protobuf error: all mean "cannot read it"
+        raise NoModelIO(f"cannot read {model.name} as an ONNX model ({type(e).__name__}): pass --input NAME:DTYPE:DIMS for every input")
     initializers = {i.name for i in graph.initializer}
 
     def tensor(value) -> Tensor:
         tt = value.type.tensor_type
-        dims = tuple(d.dim_value if d.HasField("dim_value") and d.dim_value > 0 else 1 for d in tt.shape.dim)
+        dims = tuple(d.dim_value if d.HasField("dim_value") and d.dim_value > 0 else None for d in tt.shape.dim)
         return Tensor(value.name, onnx.TensorProto.DataType.Name(tt.elem_type), dims)
 
     return ModelIO(tuple(tensor(i) for i in graph.input if i.name not in initializers), tuple(tensor(o) for o in graph.output))

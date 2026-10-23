@@ -1,5 +1,6 @@
 // Model tier scenarios: they send requests, so they need -m MODEL and -i for every input of the model.
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -36,7 +37,8 @@ int parse_input(const char *arg, struct InputSpec *spec) {
   if (!spec->elem) return 0;
   spec->rank = 0;
   for (const char *p = dims + 1; *p && spec->rank < 8;) {
-    spec->shape[spec->rank++] = atoi(p);
+    spec->dynamic[spec->rank] = *p == '?';
+    spec->shape[spec->rank++] = *p == '?' ? 1 : atoi(p);
     p = strchr(p, ',');
     if (!p) break;
     p++;
@@ -73,25 +75,27 @@ struct Build {
   int drop_last;          // leave out the last input
   const char *first_name; // rename the first input
   int other_dtype;        // give the first input another data type
-  int other_shape;        // give the first input another shape (axes reversed, or one more element on axis 0)
+  int other_shape;        // make one fixed dimension of one input one larger (see find_shape_target)
   int half_size;          // declare half the real data_size
 };
 
-static void first_input_view(const struct Build *b, int *dtype, size_t *elem, int *rank, int *shape, const char **name) {
-  const struct InputSpec *s = &opt.inputs[0];
-  *dtype = s->dtype, *elem = s->elem, *rank = s->rank, *name = b->first_name ? b->first_name : s->name;
-  memcpy(shape, s->shape, sizeof s->shape);
-  if (b->other_dtype) *dtype = s->dtype == 1 ? 2 : 1, *elem = element_size(*dtype);
-  if (b->other_shape) {
-    int reversed[8], same = 1;
-    for (int i = 0; i < *rank; i++) reversed[i] = shape[*rank - 1 - i], same &= reversed[i] == shape[i];
-    if (same || *rank < 2) shape[0] += 1;
-    else memcpy(shape, reversed, sizeof reversed);
-  }
+// A wrong shape needs a dimension the model fixes: a dynamic dimension accepts any size. 0 if every dimension is dynamic (or rank 0).
+static int find_shape_target(int *input, int *dim) {
+  for (int i = 0; i < opt.num_inputs; i++)
+    for (int d = 0; d < opt.inputs[i].rank; d++)
+      if (!opt.inputs[i].dynamic[d]) return *input = i, *dim = d, 1;
+  return 0;
+}
+
+static size_t request_bytes(void) {
+  size_t total = 0;
+  for (int i = 0; i < opt.num_inputs; i++) total += element_count(opt.inputs[i].shape, opt.inputs[i].rank) * opt.inputs[i].elem;
+  return total ? total : 1;
 }
 
 static Tensors *build(int id, const struct Build *b) {
-  int count = b->empty ? 0 : opt.num_inputs - (b->drop_last ? 1 : 0);
+  int count = b->empty ? 0 : opt.num_inputs - (b->drop_last ? 1 : 0), target_input = -1, target_dim = 0;
+  if (b->other_shape) find_shape_target(&target_input, &target_dim);
   Tensors *t = calloc(1, sizeof *t);
   t->id = id;
   t->num_tensors = count;
@@ -101,7 +105,9 @@ static Tensors *build(int id, const struct Build *b) {
     size_t elem = opt.inputs[i].elem;
     const char *name = opt.inputs[i].name;
     memcpy(shape, opt.inputs[i].shape, sizeof shape);
-    if (i == 0) first_input_view(b, &dtype, &elem, &rank, shape, &name);
+    if (i == 0 && b->first_name) name = b->first_name;
+    if (i == 0 && b->other_dtype) dtype = dtype == 1 ? 2 : 1, elem = element_size(dtype);
+    if (i == target_input) shape[target_dim] += 1;
     size_t bytes = element_count(shape, rank) * elem;
     TensorDescriptor *d = &t->tensors[i];
     d->name = strdup(name);
@@ -129,58 +135,65 @@ static int untouched(const Tensors *t, int id, const struct Build *b) {
   return same;
 }
 
-static double now_ms(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static uint64_t fnv(uint64_t h, const void *data, size_t n) {
   for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)data)[i]) * 1099511628211ull;
   return h;
 }
 
-// What the runtime returned, as JSON members: routing, allocation, sizes, a hash of the data.
+// snprintf that never moves past the end of the buffer.
+static void add(char *buf, size_t *n, size_t size, const char *fmt, ...) {
+  if (*n + 1 >= size) return;
+  va_list ap;
+  va_start(ap, fmt);
+  int written = vsnprintf(buf + *n, size - *n, fmt, ap);
+  va_end(ap);
+  if (written > 0) *n = *n + (size_t)written < size ? *n + (size_t)written : size - 1;
+}
+
+// What the runtime returned, as JSON members: routing, allocation, sizes, a hash of the data. Never reads more bytes than
+// shape x element size says (a runtime that reports a bigger data_size must not crash the harness).
 static void describe(const Tensors *o, char *buf, size_t size, uint64_t *hash_out) {
   size_t n = 0;
   const void *ptrs[96];
   int num_ptrs = 0, alloc_ok = 1, size_ok = 1;
   uint64_t hash = 1469598103934665603ull;
-  n += snprintf(buf + n, size - n, "\"id\":%d,\"num\":%d,\"tensors\":[", o->id, o->num_tensors);
+  add(buf, &n, size, "\"id\":%d,\"num\":%d,\"tensors\":[", o->id, o->num_tensors);
   for (int i = 0; i < o->num_tensors && i < 16; i++) {
     const TensorDescriptor *d = &o->tensors[i];
-    size_t elems = d->rank >= 0 && d->rank <= 8 && d->shape ? element_count(d->shape, d->rank) : 0, elem = element_size(d->data_type);
-    int ok = d->name && d->rank >= 0 && (d->rank == 0 || d->shape) && (d->data_size == 0 || d->data);
-    alloc_ok &= ok;
-    if (elem && d->rank >= 0 && d->rank <= 8 && d->shape) size_ok &= d->data_size == elems * elem;
+    int rank_ok = d->rank >= 0 && d->rank <= 8 && (d->rank == 0 || d->shape);
+    size_t elem = element_size(d->data_type), expected = rank_ok ? element_count(d->shape, d->rank) * elem : 0;
+    alloc_ok &= d->name && d->rank >= 0 && (d->rank == 0 || d->shape) && (d->data_size == 0 || d->data);
+    if (elem && rank_ok) size_ok &= d->data_size == expected;
     ptrs[num_ptrs++] = d->name, ptrs[num_ptrs++] = d->shape, ptrs[num_ptrs++] = d->data;
-    if (d->data) hash = fnv(hash, d->data, d->data_size);
-    n += snprintf(buf + n, size - n, "%s{\"name\":", i ? "," : "");
+    if (d->data && elem && rank_ok) hash = fnv(hash, d->data, d->data_size < expected ? d->data_size : expected);
+    add(buf, &n, size, "%s{\"name\":", i ? "," : "");
     if (d->name) {
-      n += snprintf(buf + n, size - n, "\"");
-      for (const char *p = d->name; *p && n + 8 < size; p++) n += snprintf(buf + n, size - n, "%02x", (unsigned char)*p);
-      n += snprintf(buf + n, size - n, "\"");
-    } else n += snprintf(buf + n, size - n, "null");
-    n += snprintf(buf + n, size - n, ",\"dtype\":%d,\"rank\":%d,\"shape\":[", d->data_type, d->rank);
-    for (int k = 0; d->shape && k < d->rank && k < 8; k++) n += snprintf(buf + n, size - n, "%s%d", k ? "," : "", d->shape[k]);
-    n += snprintf(buf + n, size - n, "],\"data_size\":%zu}", d->data_size);
+      add(buf, &n, size, "\"");
+      for (const char *p = d->name; *p && n + 8 < size && p - d->name < 4096; p++) add(buf, &n, size, "%02x", (unsigned char)*p);
+      add(buf, &n, size, "\"");
+    } else add(buf, &n, size, "null");
+    add(buf, &n, size, ",\"dtype\":%d,\"rank\":%d,\"shape\":[", d->data_type, d->rank);
+    for (int k = 0; rank_ok && k < d->rank; k++) add(buf, &n, size, "%s%d", k ? "," : "", d->shape[k]);
+    add(buf, &n, size, "],\"data_size\":%zu}", d->data_size);
   }
   int distinct = 1;
   for (int a = 0; a < num_ptrs; a++)
     for (int b = a + 1; b < num_ptrs; b++) distinct &= !(ptrs[a] && ptrs[a] == ptrs[b]);
-  snprintf(buf + n, size - n, "],\"alloc_ok\":%s,\"size_ok\":%s,\"distinct\":%s,\"hash\":\"%016llx\"", alloc_ok ? "true" : "false",
-           size_ok ? "true" : "false", distinct ? "true" : "false", (unsigned long long)hash);
+  add(buf, &n, size, "],\"alloc_ok\":%s,\"size_ok\":%s,\"distinct\":%s,\"hash\":\"%016llx\"", alloc_ok ? "true" : "false",
+      size_ok ? "true" : "false", distinct ? "true" : "false", (unsigned long long)hash);
   if (hash_out) *hash_out = hash;
 }
 
 static void dump_output(const char *step, const Tensors *o) {
   if (!opt.dump) return;
-  for (int i = 0; i < o->num_tensors; i++) {
+  for (int i = 0; i < o->num_tensors && i < 16; i++) {
+    const TensorDescriptor *d = &o->tensors[i];
+    size_t elem = element_size(d->data_type), expected = d->rank >= 0 && d->rank <= 8 && d->shape ? element_count(d->shape, d->rank) * elem : 0;
     char path[600];
     snprintf(path, sizeof path, "%s/%s_%d.bin", opt.dump, step, i);
     FILE *f = fopen(path, "wb");
     if (!f) continue;
-    if (o->tensors[i].data) fwrite(o->tensors[i].data, 1, o->tensors[i].data_size, f);
+    if (d->data && elem) fwrite(d->data, 1, d->data_size < expected ? d->data_size : expected, f);  // never past what the shape says
     fclose(f);
   }
 }
@@ -189,7 +202,18 @@ static void dump_output(const char *step, const Tensors *o) {
 
 static char big[1 << 16];
 
+static int calibrated;
+
+// The first answered request sets the pace: a slow device (or a slow first inference) must not turn into failures further on.
+static void calibrate(double ms, int answered) {
+  calibrated = 1;
+  if (!answered) return;
+  if (ms * 20 > opt.timeout_ms) opt.timeout_ms = (int)(ms * 20);
+  if (ms * 10 > opt.lost_after_ms) opt.lost_after_ms = (int)(ms * 10);
+}
+
 // enqueue + retrieve one request; records both statuses, the routing and the output. Returns the retrieve status.
+// The very first call may take up to --warmup-ms.
 static int roundtrip(const char *step, int model_id, int id) {
   struct Build valid = {0};
   Tensors *input = build(id, &valid), *output = NULL;
@@ -204,8 +228,9 @@ static int roundtrip(const char *step, int model_id, int id) {
   }
   int out_model = -1;
   double t0 = now_ms();
-  RuntimeStatus got = rt.retrieve_output(&out_model, &output, opt.timeout_ms);
+  RuntimeStatus got = rt.retrieve_output(&out_model, &output, calibrated ? opt.timeout_ms : opt.warmup_ms);
   double ms = now_ms() - t0;
+  if (!calibrated) calibrate(ms, got == RUNTIME_STATUS_SUCCESS);
   char head[96];
   snprintf(head, sizeof head, "\"enqueue\":%d,\"model_id\":%d,\"ms\":%.2f", enq, out_model, ms);
   if (got == RUNTIME_STATUS_SUCCESS && output) {
@@ -235,6 +260,7 @@ static void timed_retrieve(const char *step, int timeout_ms) {
 static void start(void) {
   do_init("init", opt.config, 1);
   load_user_model("load");
+  roundtrip("warmup", 0, 1);  // sets the timeouts for the rest of the scenario
 }
 
 static void info_snapshot(const char *step) { do_string(step, rt.get_info); }
@@ -325,7 +351,6 @@ int scenario_timeouts(void) {
 // 8 prepared requests: time spent enqueueing against 8 requests run one after the other.
 int scenario_enqueue_latency(void) {
   start();
-  roundtrip("warmup", 0, 1);
   struct Build valid = {0};
   enum { N = 8 };
   Tensors *batch[N];
@@ -390,7 +415,12 @@ int scenario_validation(void) {
   struct Build dtype = {.other_dtype = 1}, shape = {.other_shape = 1}, half = {.half_size = 1};
   struct Build name = {.first_name = "oaax-conformance-unknown-input"};
   try_case("wrong_dtype", 0, build(6, &dtype), &dtype, 6, 0);
-  try_case("wrong_shape", 0, build(7, &shape), &shape, 7, 0);
+  int shape_input, shape_dim;
+  if (find_shape_target(&shape_input, &shape_dim)) try_case("wrong_shape", 0, build(7, &shape), &shape, 7, 0);
+  else {
+    begin("wrong_shape");
+    done("wrong_shape", NO_STATUS, NULL, "\"skipped\":true");  // every dimension is dynamic: no shape is wrong
+  }
   try_case("short_data_size", 0, build(8, &half), &half, 8, 0);
   try_case("unknown_name", 0, build(9, &name), &name, 9, 0);
   roundtrip("still_usable", 0, 99);
@@ -416,36 +446,94 @@ static void *produce(void *arg) {
   return NULL;
 }
 
+// The outputs of one request, kept to compare later ones with.
+struct Reference {
+  int num, dtype[16];
+  size_t size[16];
+  void *data[16];
+};
+
+static size_t checked_bytes(const TensorDescriptor *d) {
+  size_t elem = element_size(d->data_type), expected = d->rank >= 0 && d->rank <= 8 && d->shape ? element_count(d->shape, d->rank) * elem : 0;
+  return d->data && elem ? (d->data_size < expected ? d->data_size : expected) : 0;
+}
+
+static void keep(struct Reference *r, const Tensors *o) {
+  r->num = o->num_tensors < 16 ? o->num_tensors : 16;
+  for (int i = 0; i < r->num; i++) {
+    r->dtype[i] = o->tensors[i].data_type;
+    r->size[i] = checked_bytes(&o->tensors[i]);
+    r->data[i] = malloc(r->size[i] ? r->size[i] : 1);
+    memcpy(r->data[i], o->tensors[i].data, r->size[i]);
+  }
+}
+
+// Same tensors, floats within 1e-4 relative (runtimes may sum in another order), everything else exactly.
+static int matches(const struct Reference *r, const Tensors *o) {
+  if (o->num_tensors != r->num) return 0;
+  for (int i = 0; i < r->num; i++) {
+    const TensorDescriptor *d = &o->tensors[i];
+    if ((int)d->data_type != r->dtype[i] || checked_bytes(d) != r->size[i]) return 0;
+    if (r->dtype[i] != 1 && r->dtype[i] != 11) {
+      if (memcmp(d->data, r->data[i], r->size[i])) return 0;
+      continue;
+    }
+    size_t step = r->dtype[i] == 1 ? 4 : 8;
+    for (size_t off = 0; off + step <= r->size[i]; off += step) {
+      double a = r->dtype[i] == 1 ? *(const float *)((char *)r->data[i] + off) : *(const double *)((char *)r->data[i] + off);
+      double b = r->dtype[i] == 1 ? *(const float *)((char *)d->data + off) : *(const double *)((char *)d->data + off);
+      double diff = a > b ? a - b : b - a, scale = (a < 0 ? -a : a) > (b < 0 ? -b : b) ? (a < 0 ? -a : a) : (b < 0 ? -b : b);
+      if (diff > 1e-6 && diff > 1e-4 * scale) return 0;
+    }
+  }
+  return 1;
+}
+
 int scenario_concurrency(void) {
   do_init("init", opt.config, 1);
   ModelConfig two[2] = {{.file_path = opt.model}, {.file_path = opt.model}};
   begin("load");
   RuntimeStatus s = rt.load_models(2, two);
   done("load", s, NULL, NULL);
-  if (s != RUNTIME_STATUS_SUCCESS) exit(EXIT_MODEL);
+  int models = 2;
+  if (s != RUNTIME_STATUS_SUCCESS) {  // a runtime that holds one model at a time still gets the concurrency tests, on model id 0
+    ModelConfig one[1] = {{.file_path = opt.model}};
+    begin("load_one");
+    s = rt.load_models(1, one);
+    done("load_one", s, NULL, NULL);
+    models = 1;
+  }
+  if (s != RUNTIME_STATUS_SUCCESS) {
+    end_marker("model");
+    exit(EXIT_MODEL);
+  }
+  roundtrip("warmup", 0, 1);  // sets the timeouts
 
-  uint64_t expected[2] = {0, 0};
-  for (int m = 0; m < 2; m++) {  // the same input run alone is the reference for every model id
+  struct Reference reference[2] = {{0}, {0}};
+  for (int m = 0; m < models; m++) {  // the same input run alone is the reference for every model id
     struct Build valid = {0};
     Tensors *t = build(1, &valid), *o = NULL;
     int out_model;
     if (rt.enqueue_input(m, t) != RUNTIME_STATUS_SUCCESS) free_tensors(t);
     else if (rt.retrieve_output(&out_model, &o, opt.timeout_ms) == RUNTIME_STATUS_SUCCESS) {
-      describe(o, big, sizeof big, &expected[m]);
+      keep(&reference[m], o);
       free_tensors(o);
     }
   }
 
-  int producers = opt.producers, total = producers * opt.per_producer;
+  int producers = opt.producers, per_producer = opt.per_producer;
+  long cap = (long)((256u << 20) / request_bytes());  // never hold more than ~256 MB of requests at once
+  if ((long)producers * per_producer > cap) per_producer = cap / producers > 1 ? (int)(cap / producers) : 1;
+  int total = producers * per_producer;
   struct Producer *args = calloc(producers, sizeof *args);
   pthread_t *threads = calloc(producers, sizeof *threads);
   char *seen = calloc(total, 1);
   begin("run");
   for (int p = 0; p < producers; p++) {
-    args[p] = (struct Producer){.index = p, .count = opt.per_producer, .num_models = 2};
+    args[p] = (struct Producer){.index = p, .count = per_producer, .num_models = models};
     pthread_create(&threads[p], NULL, produce, &args[p]);
   }
-  int received = 0, duplicates = 0, wrong_model = 0, bad_hash = 0, unknown_id = 0, stalled = 0;
+  int received = 0, duplicates = 0, wrong_model = 0, mismatch = 0, unknown_id = 0, stalled = 0;
   double t0 = now_ms();
   while (received + duplicates < total) {
     int model_id = -1;
@@ -455,24 +543,22 @@ int scenario_concurrency(void) {
       break;
     }
     int p = o->id / 100000, i = o->id % 100000;
-    uint64_t hash;
-    describe(o, big, sizeof big, &hash);
-    if (p < 0 || p >= producers || i >= opt.per_producer) unknown_id++;
+    if (p < 0 || p >= producers || i >= per_producer) unknown_id++;
     else {
-      if (seen[p * opt.per_producer + i]++) duplicates++;
+      if (seen[p * per_producer + i]++) duplicates++;
       else received++;
-      wrong_model += model_id != i % 2;
-      bad_hash += model_id >= 0 && model_id < 2 && hash != expected[model_id];
+      wrong_model += model_id != i % models;
+      mismatch += model_id >= 0 && model_id < models && reference[model_id].num && !matches(&reference[model_id], o);
     }
     free_tensors(o);
   }
   int enqueue_failures = 0;
   for (int p = 0; p < producers; p++) pthread_join(threads[p], NULL), enqueue_failures += args[p].enqueue_failures;
-  char extra[400];
+  char extra[480];
   snprintf(extra, sizeof extra,
-           "\"expected\":%d,\"received\":%d,\"duplicates\":%d,\"wrong_model\":%d,\"bad_hash\":%d,\"unknown_id\":%d,"
+           "\"models\":%d,\"expected\":%d,\"received\":%d,\"duplicates\":%d,\"wrong_model\":%d,\"mismatch\":%d,\"unknown_id\":%d,"
            "\"enqueue_failures\":%d,\"stalled\":%s,\"ms\":%.0f",
-           total, received, duplicates, wrong_model, bad_hash, unknown_id, enqueue_failures, stalled ? "true" : "false", now_ms() - t0);
+           models, total, received, duplicates, wrong_model, mismatch, unknown_id, enqueue_failures, stalled ? "true" : "false", now_ms() - t0);
   done("run", NO_STATUS, NULL, extra);
   do_cleanup("cleanup");
   return 0;
@@ -527,39 +613,46 @@ int scenario_cleanup_wakeup(void) {
   snprintf(extra, sizeof extra, "\"woke\":%s,\"retrieve_status\":%d", woke ? "true" : "false", status);
   begin("wakeup");
   done("wakeup", NO_STATUS, NULL, extra);
-  if (!woke) _exit(0);  // the thread is stuck inside the runtime: do not wait for it again
+  if (!woke) {  // the thread is stuck inside the runtime: do not wait for it again
+    end_marker("ok");
+    _exit(0);
+  }
   return 0;
 }
 
 int scenario_flood(void) {
   start();
   struct Build valid = {0};
-  int accepted = 0, rejected = 0;
+  int accepted = 0, rejected = 0, sent = 0, requested = opt.flood;
+  long cap = (long)((256u << 20) / request_bytes());  // requests wait inside the runtime: never more than ~256 MB of them
+  if (requested > cap) requested = cap < 10 ? 10 : (int)cap;
   double max_ms = 0, t_all = now_ms();
-  for (int i = 0; i < opt.flood; i++) {
+  for (int i = 0; i < requested && !out_of_time(0); i++) {
     Tensors *t = build(1000 + i, &valid);
     double t0 = now_ms();
     RuntimeStatus s = rt.enqueue_input(0, t);
     double ms = now_ms() - t0;
     if (ms > max_ms) max_ms = ms;
+    sent++;
     if (s == RUNTIME_STATUS_SUCCESS) accepted++;
     else rejected++, free_tensors(t);
   }
   double enqueue_total = now_ms() - t_all;
-  char *seen = calloc(opt.flood, 1);
+  char *seen = calloc(requested, 1);
   int answered = 0, duplicates = 0;
   for (int i = 0; i < accepted; i++) {
     int model_id;
     Tensors *o = NULL;
     if (rt.retrieve_output(&model_id, &o, opt.timeout_ms) != RUNTIME_STATUS_SUCCESS) break;
     int idx = o->id - 1000;
-    if (idx >= 0 && idx < opt.flood && seen[idx]++) duplicates++;
+    if (idx >= 0 && idx < requested && seen[idx]++) duplicates++;
     else answered++;
     free_tensors(o);
   }
-  char extra[200];
-  snprintf(extra, sizeof extra, "\"requests\":%d,\"accepted\":%d,\"rejected\":%d,\"answered\":%d,\"duplicates\":%d,\"max_enqueue_ms\":%.1f,\"enqueue_total_ms\":%.0f",
-           opt.flood, accepted, rejected, answered, duplicates, max_ms, enqueue_total);
+  char extra[260];
+  snprintf(extra, sizeof extra,
+           "\"requests\":%d,\"requested\":%d,\"accepted\":%d,\"rejected\":%d,\"answered\":%d,\"duplicates\":%d,\"max_enqueue_ms\":%.1f,\"enqueue_total_ms\":%.0f",
+           sent, opt.flood, accepted, rejected, answered, duplicates, max_ms, enqueue_total);
   begin("flood");
   done("flood", NO_STATUS, NULL, extra);
   return finish();
@@ -569,6 +662,7 @@ int scenario_info_state(void) {
   do_init("init", opt.config, 1);
   info_snapshot("info_no_model");
   load_user_model("load");
+  roundtrip("warmup", 0, 1);
   info_snapshot("info_loaded");
   struct Build valid = {0};
   for (int i = 0; i < 3; i++) {
@@ -588,10 +682,10 @@ int scenario_info_state(void) {
 int scenario_model_cycles(void) {
   start();  // a runtime that cannot start or load the model at all is "blocked", not a cycle failure
   do_cleanup("cleanup_first");
-  int baseline = thread_count(), failures = 0;
+  int baseline = thread_count(), failures = 0, completed = 0;
   long rss_first = -1;
   char first_failure[128] = "";
-  for (int c = 0; c < opt.model_cycles && !failures; c++) {
+  for (int c = 0; c < opt.model_cycles && !failures && !out_of_time(0); c++) {
     begin("model_cycle");
     ModelConfig model = {.file_path = opt.model};
     RuntimeStatus si = rt.init(opt.config), sl = si ? si : rt.load_models(1, &model);
@@ -606,12 +700,14 @@ int scenario_model_cycles(void) {
     }
     RuntimeStatus sc = si ? RUNTIME_STATUS_SUCCESS : rt.cleanup();
     if (bad || sc) failures++, snprintf(first_failure, sizeof first_failure, "cycle %d: init=%d load=%d cleanup=%d", c, si, sl, sc);
+    else completed++;
     if (c == 0) rss_first = rss_bytes();
   }
   settle(baseline, opt.settle_ms);
-  char extra[300];
-  snprintf(extra, sizeof extra, "\"cycles\":%d,\"failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,\"rss_last\":%ld,\"threads_before\":%d,\"threads_after\":%d",
-           opt.model_cycles, failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
+  char extra[340];
+  snprintf(extra, sizeof extra,
+           "\"cycles\":%d,\"completed\":%d,\"failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,\"rss_last\":%ld,\"threads_before\":%d,\"threads_after\":%d",
+           opt.model_cycles, completed, failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
   done("model_cycles", NO_STATUS, NULL, extra);
   return 0;
 }
@@ -619,18 +715,20 @@ int scenario_model_cycles(void) {
 int scenario_leak_requests(void) {
   start();
   struct Build valid = {0};
-  int failures = 0;
+  int failures = 0, completed = 0;
   long rss_before = 0;
-  for (int i = 0; i < 50 + opt.requests; i++) {
+  for (int i = 0; i < 50 + opt.requests && !out_of_time(0); i++) {
     if (i == 50) rss_before = rss_bytes();  // the first requests grow caches and pools
     Tensors *t = build(i, &valid), *o = NULL;
     int model_id;
     if (rt.enqueue_input(0, t) != RUNTIME_STATUS_SUCCESS) free_tensors(t), failures++;
     else if (rt.retrieve_output(&model_id, &o, opt.timeout_ms) != RUNTIME_STATUS_SUCCESS) failures++;
     else free_tensors(o);
+    if (i >= 50) completed++;
   }
-  char extra[160];
-  snprintf(extra, sizeof extra, "\"requests\":%d,\"failures\":%d,\"rss_before\":%ld,\"rss_after\":%ld", opt.requests, failures, rss_before, rss_bytes());
+  char extra[200];
+  snprintf(extra, sizeof extra, "\"requests\":%d,\"completed\":%d,\"failures\":%d,\"rss_before\":%ld,\"rss_after\":%ld", opt.requests, completed, failures,
+           rss_before, rss_bytes());
   begin("leak");
   done("leak", NO_STATUS, NULL, extra);
   return finish();
