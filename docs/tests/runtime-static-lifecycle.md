@@ -3,6 +3,18 @@
 Spec version under test: **2.0**. Source = `interface.h` (normative) and the Runtime Specification page.
 Probed = reference CPU, Intel, Hailo and PythonBindings CPU 2.0 runtimes, run by hand on a machine without an accelerator.
 
+## Levels
+
+The level says **how the spec text backs the test**, not how important the behaviour is.
+
+| Level | Meaning | If the runtime fails it | Exit code |
+| ----- | ------- | ----------------------- | --------- |
+| **MUST** | The spec text of the version under test requires it. The Source column quotes the sentence. | `FAIL`: the runtime does not conform. | `1` |
+| **SHOULD** | The text recommends it, or it follows from the text without being written (the Source column says "derived" and why). | `WARN`: worth fixing, does not fail the run. | `0` |
+| **PROPOSED** | The text says nothing; it is the behaviour planned for the next spec version. | `WARN`: the suite is ahead of the spec. | `0` |
+
+A MUST test that could not run (for example `init` fails without vendor keys) is `BLOCKED` and makes the run `INCOMPLETE` (exit code `2`). A test without a quoted source is never MUST.
+
 ## `RT-S`: static (library only, no `init`, no device)
 
 | ID | Check | Pass when | Level | Source | Probed | Status |
