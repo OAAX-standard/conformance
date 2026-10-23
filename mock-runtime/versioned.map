@@ -1,0 +1,6 @@
+OAAX_MOCK {
+  global:
+    runtime_*;
+  local:
+    *;
+};
