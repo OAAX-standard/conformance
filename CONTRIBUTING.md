@@ -12,4 +12,10 @@ first: it sets out the guidelines for the whole project, including the sign-off 
 
 ## Development environment
 
-Not set up yet: the suite is being scaffolded.
+```bash
+scripts/build.sh && pip install -e ".[test]" && python -m pytest
+```
+
+To add a test: write it in `docs/tests/` first (level, source clause, pass condition) and get it `approved`, then implement the check in
+`python/oaax_conformance/checks/` with `@check("<ID>")` and add a fault to `mock-runtime/mock.c` plus a case in `tests/test_suite.py`
+that makes it fail. The self-tests insist on all three.

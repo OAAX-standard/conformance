@@ -3,7 +3,8 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: scaffolding.** Nothing is runnable yet. This README is the design the suite is built to.
+> **Status: early.** Batch 1 (20 runtime tests: static + lifecycle, Linux) runs. Toolchain and model tiers are specified in
+> [docs/tests/](docs/tests/) as they get approved, then implemented.
 
 ## Principles
 
@@ -31,14 +32,17 @@ Every test carries the spec clause it comes from and a level:
 - **SHOULD**: recommended by the text. A failure is a warning.
 - **PROPOSED**: behaviour planned for the next version. Always a warning, so the suite can lead the specification.
 
-## Planned usage
+## Usage (Linux)
 
 ```bash
-oaax-conformance runtime ./libRuntimeLibrary.so [--model model.zip] [--spec 2.0]
-oaax-conformance toolchain oaax-<vendor>-toolchain:tag
+scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
+pip install -e .
+oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--ignore-thread NAME] [--report r.json] [--junit r.xml]
 ```
 
-The report is a JSON file (suite version, spec version, library sha256, platform, results) plus a JUnit XML for CI.
+Exit code: `0` no MUST check failed, `1` a MUST failed, `2` nothing failed but a MUST check could not run (for example `init` needs vendor
+keys: pass them with `--init-config`). Failures name the spec clause. The suite tests itself against a mock runtime with
+injected faults: `python -m pytest`.
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 
