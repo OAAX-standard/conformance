@@ -61,9 +61,15 @@ def test_a_slow_first_inference_does_not_fail_the_round_trip(build_dir, monkeypa
     assert {i: r.outcome for i, r in results.items()} == {"RT-M-08": "pass", "RT-M-02": "pass", "RT-M-09": "pass"}
 
 
-def test_a_scenario_that_cannot_finish_in_time_is_blocked_not_failed(build_dir, monkeypatch):
-    results = _run(build_dir, "slow_init", ["RT-L-01"], monkeypatch, timeout=5)  # five inits of 2.5 s do not fit
+def test_a_call_that_stalls_is_blocked_not_failed(build_dir, monkeypatch):
+    results = _run(build_dir, "hang_init", ["RT-L-01"], monkeypatch, timeout=5)
     assert results["RT-L-01"].outcome == "blocked" and "--timeout" in results["RT-L-01"].message
+
+
+def test_a_slow_init_repeated_in_one_scenario_is_not_cut_off(build_dir, monkeypatch):
+    """The timeout is per call: five inits of 2.5 s (12.5 s) under --timeout 5 used to BLOCK every lifecycle check (a 76 s init hit the 300 s default)."""
+    results = _run(build_dir, "slow_init", ["RT-L-01", "RT-L-03"], monkeypatch, timeout=5)
+    assert {r.outcome for r in results.values()} == {"pass"}
 
 
 def test_loops_stop_at_the_time_budget_and_the_check_says_so(build_dir, monkeypatch):

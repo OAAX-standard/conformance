@@ -95,7 +95,7 @@ class Run:
 
     def how_it_ended(self) -> str:
         if self.timed_out:
-            return f"did not finish within {self.timeout} s"
+            return f"stalled for {self.timeout} s (or took over {self.timeout * TOTAL_FACTOR} s in all)"
         return f"crashed ({self.signal_name})" if self.returncode < 0 else f"ended the process (exit code {self.returncode})"
 
     def step(self, name: str) -> dict:
@@ -205,6 +205,28 @@ def _stop(proc: subprocess.Popen) -> None:
         pass
 
 
+TOTAL_FACTOR = 6  # a scenario may take this many timeouts in all, as long as no single call stalls
+
+
+def _wait_while_progressing(proc, observations: Path, timeout: int) -> bool:
+    """True when the process ended. The timeout is the longest a single call may take, not the length of the scenario: the harness writes a line
+    before every call and after it, so a slow device (a 76 s init, four times) is not cut off while each call is still finishing."""
+    started = last_progress = time.monotonic()
+    size = 0
+    while True:
+        try:
+            proc.wait(timeout=0.5)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        grown = observations.stat().st_size if observations.exists() else 0
+        if grown != size:
+            size, last_progress = grown, now
+        if now - last_progress > timeout or now - started > TOTAL_FACTOR * timeout:
+            return False
+
+
 def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeout: int, extra: list[str] = (), workdir: str | None = None) -> Run:
     own_dir = tempfile.TemporaryDirectory() if workdir is None else None  # runtimes drop log files into their working directory
     cwd = Path(workdir) if workdir else Path(own_dir.name)
@@ -220,14 +242,13 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
         with open(stdout, "wb") as o, open(stderr, "wb") as e:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=o, stderr=e, start_new_session=True)
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _stop(proc)
+                timed_out = not _wait_while_progressing(proc, out, timeout)
+                if timed_out:
+                    _stop(proc)
             except BaseException:
                 _stop(proc)
                 raise
-            else:
+            if not timed_out:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
                 except ProcessLookupError:
