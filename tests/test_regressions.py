@@ -402,3 +402,50 @@ def test_h1_what_a_runtime_prints_is_captured_bounded(build_dir, monkeypatch):
     run = _scenario(build_dir, "lifecycle")
     assert kinds == [True], "the runtime's output must go to a pipe we read, not to a file"
     assert 0 < len(run.stdout_tail) <= 2000 and run.end is not None
+
+
+# ---- adversary round 3: tests that stayed green when their fix was undone ---------------------------------------------
+
+
+def test_the_console_hides_secrets_too(build_dir, tmp_path, monkeypatch, capsys):
+    """Round 2's secret test never put a secret on the console (every check passed): here a failed model load echoes the config into the message."""
+    bad = tmp_path / "bad.model"
+    bad.write_text("garbage")
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "echo_config")
+    cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=SECRET123",
+              "--model", str(bad), "--input", "x:FLOAT:1,4", "--input", "scale:FLOAT:1", "--only", "RT-M-08", "--quiet"])
+    console = capsys.readouterr().out
+    assert "config=***" in console and "SECRET123" not in console
+
+
+def test_hardware_safe_shrinks_every_load_and_pauses(build_dir):
+    ctx, safe = helpers.context(build_dir), helpers.context(build_dir)
+    ctx.cycles, ctx.model_cycles, ctx.flood, ctx.requests, ctx.producers, ctx.per_producer, ctx.pause = 20, 20, 1000, 1000, 8, 100, 0
+    safe.__dict__.update(ctx.__dict__)
+    safe.hardware_safe()
+    assert (safe.cycles, safe.model_cycles, safe.flood, safe.requests, safe.producers, safe.per_producer) == (3, 3, 50, 50, 2, 10)
+    assert safe.pause >= 3 and ctx.pause == 0
+
+
+def test_b4_hashing_reads_in_chunks(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from oaax_conformance.toolchain import tree
+
+    (tmp_path / "big.bin").write_bytes(b"y" * ((1 << 20) * 3 + 5))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("a whole file was read into memory"))
+    import hashlib
+
+    assert tree(tmp_path)["big.bin"]["sha256"] == hashlib.sha256(b"y" * ((1 << 20) * 3 + 5)).hexdigest()
+
+
+def test_junit_does_not_show_green_for_an_incomplete_run(tmp_path):
+    results = [report.Result("A", "t", "MUST", "s", "pass"), report.Result("B", "t", "MUST", "s", "blocked", "cannot run"),
+               report.Result("C", "t", "SHOULD", "s", "blocked", "cannot run"), report.Result("D", "t", "MUST", "s", "skipped", "by request")]
+    from dataclasses import asdict
+
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), {"spec_version": "2.0", "results": [asdict(r) for r in results]})
+    suite = ET.parse(path).getroot()
+    assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("4", "0", "2", "1")
+    assert [c.find("error") is not None for c in suite.iter("testcase")] == [False, True, False, True]

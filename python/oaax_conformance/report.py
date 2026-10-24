@@ -196,11 +196,18 @@ def write_json(path: str, doc: dict) -> None:
 
 def write_junit(path: str, doc: dict) -> None:
     results = [Result(**{k: v for k, v in r.items()}) for r in doc["results"]]
-    suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)))
+    # a MUST that could not run or was skipped is INCOMPLETE (exit code 2): an <error>, so that a CI tool reading only this file does not show green
+    incomplete = lambda r: r.outcome in ("blocked", "skipped") and r.level == "MUST"  # noqa: E731
+    count = lambda pred: str(sum(1 for r in results if pred(r)))  # noqa: E731
+    suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)), failures=count(lambda r: r.outcome == "fail"),
+                       errors=count(lambda r: r.outcome == "error" or incomplete(r)),
+                       skipped=count(lambda r: r.outcome in ("blocked", "skipped") and not incomplete(r)))
     for r in results:
         case = ET.SubElement(suite, "testcase", classname=r.level, name=f"{r.id} {r.title}")
-        if r.outcome in ("fail", "error"):
+        if r.outcome == "fail":
             ET.SubElement(case, "failure", message=r.message).text = f"spec: {r.source}"
+        elif r.outcome == "error" or incomplete(r):
+            ET.SubElement(case, "error", type=r.outcome.upper() if r.outcome == "error" else "INCOMPLETE", message=r.message).text = f"spec: {r.source}"
         elif r.outcome in ("blocked", "skipped"):
             ET.SubElement(case, "skipped", message=r.message)
         elif r.outcome == "warn":
