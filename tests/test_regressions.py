@@ -371,3 +371,34 @@ def test_c2_the_html_report_is_written_when_a_check_crashed(build_dir, tmp_path,
     code = cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1",
                      "--only", "RT-S-03", "--quiet", "--out", str(out)])
     assert code == 4 and {p.name for p in out.iterdir()} == {"report.html", "report.json", "junit.xml"}
+
+
+def test_h1_what_a_runtime_prints_is_captured_bounded(build_dir, monkeypatch):
+    """H1: stdout/stderr went to temp files nobody capped (9 GB in 5 s in the adversary's repro); now a ring of the last bytes."""
+    import os
+    import subprocess
+    import sys
+
+    from oaax_conformance.harness import TailCapture
+
+    cap = TailCapture(100)
+    child = subprocess.Popen([sys.executable, "-c", "import sys\nfor i in range(200000): sys.stdout.write('x' * 100 + '%d\\n' % i)"], stdout=cap.write_fd)
+    cap.child_started()
+    child.wait()
+    tail = cap.value()
+    assert len(tail) <= 100 and tail.endswith(b"199999\n")
+    import stat
+
+    from oaax_conformance import harness
+
+    kinds, real = [], subprocess.Popen
+
+    def spy(*args, **kwargs):
+        kinds.append(stat.S_ISFIFO(os.fstat(kwargs["stdout"]).st_mode) if isinstance(kwargs.get("stdout"), int) else False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(harness.subprocess, "Popen", spy)
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "spam_init")
+    run = _scenario(build_dir, "lifecycle")
+    assert kinds == [True], "the runtime's output must go to a pipe we read, not to a file"
+    assert 0 < len(run.stdout_tail) <= 2000 and run.end is not None

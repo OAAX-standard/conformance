@@ -18,6 +18,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .harness import TailCapture
 from .registry import Blocked
 
 DOCKER_ERROR = 125  # `docker run` exit code for its own failures (not the container's)
@@ -242,26 +243,26 @@ class ToolchainContext:
         container = cmd[cmd.index("--name") + 1]
         if keep_container:
             cmd.remove("--rm")  # so that `docker diff` can still list what the toolchain changed inside the container
-        with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+        out_capture, err_capture = TailCapture(20000), TailCapture(20000)  # bounded: an image that prints without end must not fill the disk
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_capture.write_fd, stderr=err_capture.write_fd)
+        except BaseException:
+            out_capture.abandon(), err_capture.abandon()
+            raise
+        out_capture.child_started(), err_capture.child_started()
+        try:
             try:
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file)
-                try:
-                    code = proc.wait(timeout=self.timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out, code = True, -signal.SIGKILL
-                    proc.kill()
-                    proc.wait()
-            except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
-                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-                raise
-            if timed_out:
-                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-            out_file.seek(0, 2)
-            out_file.seek(max(0, out_file.tell() - 20000))
-            out = out_file.read()
-            err_file.seek(0, 2)
-            err_file.seek(max(0, err_file.tell() - 20000))
-            err = err_file.read()
+                code = proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                timed_out, code = True, -signal.SIGKILL
+                proc.kill()
+                proc.wait()
+        except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            raise
+        if timed_out:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        out, err = out_capture.value(), err_capture.value()
         changes = []
         if keep_container:
             diff = subprocess.run(["docker", "diff", container], capture_output=True, text=True).stdout

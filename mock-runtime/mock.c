@@ -101,6 +101,8 @@ EXPORT RuntimeStatus runtime_init(Config config) {
   if (fault("require_config") && !has_key) return fail(RUNTIME_STATUS_ERROR, "config required");
   if (fault("slow_init")) sleep_ms(2500);
   if (fault("hang_init")) sleep_ms(600000);
+  if (fault("spam_init"))  // prints as fast as it can for a while: the suite must keep only the tail
+    for (double end = now_ms() + 1500; now_ms() < end;) fwrite("garbagegarbagegarbagegarbagegarbagegarbagegarbagegarbage\n", 1, 55, stdout);
   if (fault("chatty")) {
     for (int i = 0; i < 400; i++) fprintf(stderr, "mock runtime: noisy line %03d ......................................................\n", i);
     fflush(stderr);

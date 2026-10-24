@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,14 +178,42 @@ class Run:
         return value
 
 
-def _tail(path: Path) -> str:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - TAIL))
-            return f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
+class TailCapture:
+    """The last `limit` bytes of what a child process prints. A pipe read by a thread, never a file: a runtime (or a toolchain) that prints without
+    end would fill the host's disk, and the suite's temp directories with it. A helper that outlives the child holds the pipe open: nobody waits for EOF."""
+
+    def __init__(self, limit: int = TAIL):
+        self.limit, self._tail = limit, b""
+        self._read, self.write_fd = os.pipe()
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self._read, 1 << 16)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self._tail = (self._tail + chunk)[-self.limit:]
+
+    def child_started(self) -> None:
+        os.close(self.write_fd)  # the child has its own copy: EOF arrives when it (and its helpers) are gone
+
+    def abandon(self) -> None:
+        """Before an error leaves: the child never started, so nobody else holds the write end."""
+        for fd in (self.write_fd,):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def value(self) -> bytes:
+        self._thread.join(timeout=2)
+        if not self._thread.is_alive():
+            os.close(self._read)
+        return self._tail
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -233,26 +262,30 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
     scratch = tempfile.TemporaryDirectory()
     try:
         scratch_dir = Path(scratch.name)
-        out, stdout, stderr = scratch_dir / "observations.jsonl", scratch_dir / "stdout", scratch_dir / "stderr"
+        out = scratch_dir / "observations.jsonl"
         cmd = [harness, scenario, lib, "--out", str(out), "--budget-ms", str(int(timeout * 600)), *extra]
         for pair in config:
             cmd += ["-c", pair]
         timed_out, started = False, time.monotonic()
-        # output goes to files, not pipes: a runtime that forks a helper keeps a pipe open for as long as the helper lives
-        with open(stdout, "wb") as o, open(stderr, "wb") as e:
-            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=o, stderr=e, start_new_session=True)
-            try:
-                timed_out = not _wait_while_progressing(proc, out, timeout)
-                if timed_out:
-                    _stop(proc)
-            except BaseException:
+        stdout, stderr = TailCapture(), TailCapture()  # bounded: see TailCapture
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout.write_fd, stderr=stderr.write_fd, start_new_session=True)
+        except BaseException:
+            stdout.abandon(), stderr.abandon()
+            raise
+        stdout.child_started(), stderr.child_started()
+        try:
+            timed_out = not _wait_while_progressing(proc, out, timeout)
+            if timed_out:
                 _stop(proc)
-                raise
-            if not timed_out:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
-                except ProcessLookupError:
-                    pass
+        except BaseException:
+            _stop(proc)
+            raise
+        if not timed_out:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
+            except ProcessLookupError:
+                pass
         text = out.read_text(errors="replace") if out.exists() else ""
         lines = []
         for line in text.splitlines():
@@ -260,7 +293,8 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 lines.append(json.loads(line))
             except ValueError:
                 pass  # a half-written last line of a killed process
-        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, _tail(stdout), _tail(stderr))
+        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout,
+                   stdout.value().decode("utf-8", errors="replace"), stderr.value().decode("utf-8", errors="replace"))
     finally:
         scratch.cleanup()
         if own_dir:
