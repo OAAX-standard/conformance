@@ -265,7 +265,7 @@ def test_exit_inside_a_call_is_blamed_on_the_call_not_on_loading(build_dir, monk
 # ---- A19 / A20: the harness survives what a runtime returns ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("fault", ["huge_name", "big_size"])
+@pytest.mark.parametrize("fault", ["huge_name", "big_size", "many_huge_outputs"])
 def test_the_harness_does_not_crash_on_oversized_names_or_sizes(build_dir, monkeypatch, fault):
     monkeypatch.setenv("OAAX_MOCK_FAULT", fault)
     run = _scenario(build_dir, "roundtrip", ["-i", "x:FLOAT:1,4", "-i", "scale:FLOAT:1"])
@@ -449,3 +449,38 @@ def test_junit_does_not_show_green_for_an_incomplete_run(tmp_path):
     suite = ET.parse(path).getroot()
     assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("4", "0", "2", "1")
     assert [c.find("error") is not None for c in suite.iter("testcase")] == [False, True, False, True]
+
+
+# ---- round 4: the tests that stayed green when their fix was undone (round 3 mutation check) -----------------------------
+
+
+def test_the_warmup_wait_is_capped_after_an_unanswered_first_request(build_dir, monkeypatch):
+    from oaax_conformance import suite
+    from oaax_conformance.harness import Run
+
+    ctx = helpers.context(build_dir, warmup_ms=120000)
+    monkeypatch.setattr(suite, "run_scenario", lambda *a, **k: Run("roundtrip", 0, False, [{"step": "warmup", "status": 6}]))
+    ctx.run("roundtrip")
+    assert ctx.warmup_ms == 10000, "the next scenario must not wait the full warm-up again"
+
+
+def test_the_lost_after_window_follows_the_first_answered_request(build_dir, monkeypatch):
+    """Accepted-and-answered must not be reported as 'silently lost' because the harness's own window was shorter than the device's pace."""
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "any_shape")
+    ctx = helpers.context(build_dir, lost_after_ms=1)
+    result = helpers.run(ctx, ["RT-M-23"])["RT-M-23"]
+    assert result.outcome == "fail" and "and answered" in result.message, result
+
+
+def test_the_byte_cap_holds_in_the_concurrency_scenario_too(build_dir, monkeypatch):
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "any_shape")  # takes any size: 4 MB per request
+    run = _scenario(build_dir, "concurrency", ["--producers", "50", "--per-producer", "100", "-i", "x:FLOAT:262144,4", "-i", "scale:FLOAT:1"])
+    assert run.step("run")["expected"] <= 70  # 256 MB / 4 MB = 64 (5000 were asked for)
+
+
+def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cli, "run_suite", lambda *a, **k: SimpleNamespace(results=[], not_approved=[], leftovers=[]))
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    assert "no test ran" in capsys.readouterr().err

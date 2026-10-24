@@ -130,6 +130,8 @@ def _validate(args) -> str | None:
 
 
 def _print_and_write(suite, args, title: str, document, paths: list[str], secrets: list[str]) -> int:
+    if not suite.results:  # e.g. --only names only draft tests: "0 checks, exit 0" must never look like a pass
+        return usage_error("no test ran: the selection matches no approved test (see docs/tests)")
     shown = report.scrub_results(suite.results, paths, secrets)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     print(report.console(shown, suite.not_approved, color, title))
