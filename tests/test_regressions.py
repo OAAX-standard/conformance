@@ -350,3 +350,10 @@ def test_b10_the_scenarios_scratch_dir_and_huge_texts_do_not_reach_reports():
 
     text = report.clean_text(f"cannot open {tempfile.gettempdir()}/tmpkqeophgp/dev.cfg " + "x" * 50000)
     assert "tmpkqeophgp" not in text and "<tmp>/dev.cfg" in text and len(text) < 20100 and "more characters" in text
+
+
+@pytest.mark.parametrize("fault", ["null_tensors", "negative_tensors"])
+def test_c1_malformed_output_tensors_fail_the_check_and_do_not_crash_the_harness(build_dir, monkeypatch, fault):
+    results = _run(build_dir, fault, ["RT-M-08", "RT-M-09", "RT-M-10"], monkeypatch)
+    assert results["RT-M-09"].outcome == "fail"
+    assert not {r.outcome for r in results.values()} & {"blocked", "error"}, {i: r.message for i, r in results.items()}

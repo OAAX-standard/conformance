@@ -48,7 +48,8 @@ int parse_input(const char *arg, struct InputSpec *spec) {
 
 static size_t element_count(const int *shape, int rank) {
   size_t n = 1;
-  for (int i = 0; i < rank; i++) n *= (size_t)shape[i];
+  for (int i = 0; i < rank; i++)
+    if (shape[i] < 0 || __builtin_mul_overflow(n, (size_t)shape[i], &n)) return 0;  // a runtime's shape may be anything: 0 = not countable
   return n;
 }
 
@@ -140,6 +141,26 @@ static uint64_t fnv(uint64_t h, const void *data, size_t n) {
   return h;
 }
 
+#define MAX_READ ((size_t)256 << 20)  // no conformance model returns more than this per tensor; a bigger claim is a lie we do not test by reading it
+
+// What the shape of an output says it holds, in bytes; 0 when the descriptor cannot be trusted (bad rank/shape, unknown type, absurd size).
+static size_t expected_bytes(const TensorDescriptor *d) {
+  size_t elem = element_size(d->data_type);
+  if (!elem || d->rank < 0 || d->rank > 8 || (d->rank > 0 && !d->shape)) return 0;
+  size_t n = element_count(d->shape, d->rank);
+  return n > MAX_READ / elem ? 0 : n * elem;
+}
+
+// The bytes of an output the harness may read: never more than the shape says (the runtime's data_size may be bigger).
+static size_t readable_bytes(const TensorDescriptor *d) {
+  size_t expected = expected_bytes(d);
+  return d->data ? (d->data_size < expected ? d->data_size : expected) : 0;
+}
+
+// A Tensors whose descriptor array can be indexed at all.
+static int tensors_ok(const Tensors *o) { return o->num_tensors >= 0 && (o->num_tensors == 0 || o->tensors); }
+static int shown_tensors(const Tensors *o) { return !tensors_ok(o) ? 0 : o->num_tensors < 16 ? o->num_tensors : 16; }
+
 // snprintf that never moves past the end of the buffer.
 static void add(char *buf, size_t *n, size_t size, const char *fmt, ...) {
   if (*n + 1 >= size) return;
@@ -155,17 +176,17 @@ static void add(char *buf, size_t *n, size_t size, const char *fmt, ...) {
 static void describe(const Tensors *o, char *buf, size_t size, uint64_t *hash_out) {
   size_t n = 0;
   const void *ptrs[96];
-  int num_ptrs = 0, alloc_ok = 1, size_ok = 1;
+  int num_ptrs = 0, alloc_ok = tensors_ok(o), size_ok = tensors_ok(o);
   uint64_t hash = 1469598103934665603ull;
   add(buf, &n, size, "\"id\":%d,\"num\":%d,\"tensors\":[", o->id, o->num_tensors);
-  for (int i = 0; i < o->num_tensors && i < 16; i++) {
+  for (int i = 0; i < shown_tensors(o); i++) {
     const TensorDescriptor *d = &o->tensors[i];
     int rank_ok = d->rank >= 0 && d->rank <= 8 && (d->rank == 0 || d->shape);
-    size_t elem = element_size(d->data_type), expected = rank_ok ? element_count(d->shape, d->rank) * elem : 0;
+    size_t elem = element_size(d->data_type), expected = expected_bytes(d);
     alloc_ok &= d->name && d->rank >= 0 && (d->rank == 0 || d->shape) && (d->data_size == 0 || d->data);
     if (elem && rank_ok) size_ok &= d->data_size == expected;
     ptrs[num_ptrs++] = d->name, ptrs[num_ptrs++] = d->shape, ptrs[num_ptrs++] = d->data;
-    if (d->data && elem && rank_ok) hash = fnv(hash, d->data, d->data_size < expected ? d->data_size : expected);
+    hash = fnv(hash, d->data, readable_bytes(d));
     add(buf, &n, size, "%s{\"name\":", i ? "," : "");
     if (d->name) {
       add(buf, &n, size, "\"");
@@ -186,14 +207,13 @@ static void describe(const Tensors *o, char *buf, size_t size, uint64_t *hash_ou
 
 static void dump_output(const char *step, const Tensors *o) {
   if (!opt.dump) return;
-  for (int i = 0; i < o->num_tensors && i < 16; i++) {
+  for (int i = 0; i < shown_tensors(o); i++) {
     const TensorDescriptor *d = &o->tensors[i];
-    size_t elem = element_size(d->data_type), expected = d->rank >= 0 && d->rank <= 8 && d->shape ? element_count(d->shape, d->rank) * elem : 0;
     char path[600];
     snprintf(path, sizeof path, "%s/%s_%d.bin", opt.dump, step, i);
     FILE *f = fopen(path, "wb");
     if (!f) continue;
-    if (d->data && elem) fwrite(d->data, 1, d->data_size < expected ? d->data_size : expected, f);  // never past what the shape says
+    if (readable_bytes(d)) fwrite(d->data, 1, readable_bytes(d), f);  // never past what the shape says
     fclose(f);
   }
 }
@@ -453,13 +473,10 @@ struct Reference {
   void *data[16];
 };
 
-static size_t checked_bytes(const TensorDescriptor *d) {
-  size_t elem = element_size(d->data_type), expected = d->rank >= 0 && d->rank <= 8 && d->shape ? element_count(d->shape, d->rank) * elem : 0;
-  return d->data && elem ? (d->data_size < expected ? d->data_size : expected) : 0;
-}
+static size_t checked_bytes(const TensorDescriptor *d) { return readable_bytes(d); }
 
 static void keep(struct Reference *r, const Tensors *o) {
-  r->num = o->num_tensors < 16 ? o->num_tensors : 16;
+  r->num = shown_tensors(o);
   for (int i = 0; i < r->num; i++) {
     r->dtype[i] = o->tensors[i].data_type;
     r->size[i] = checked_bytes(&o->tensors[i]);
@@ -470,7 +487,7 @@ static void keep(struct Reference *r, const Tensors *o) {
 
 // Same tensors, floats within 1e-4 relative (runtimes may sum in another order), everything else exactly.
 static int matches(const struct Reference *r, const Tensors *o) {
-  if (o->num_tensors != r->num) return 0;
+  if (o->num_tensors != r->num || !tensors_ok(o)) return 0;
   for (int i = 0; i < r->num; i++) {
     const TensorDescriptor *d = &o->tensors[i];
     if ((int)d->data_type != r->dtype[i] || checked_bytes(d) != r->size[i]) return 0;

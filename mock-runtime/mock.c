@@ -395,6 +395,8 @@ EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_ten
   pthread_mutex_unlock(&lock);
   *model_id = r->model_id;
   *output_tensors = make_output(r);
+  if (fault("null_tensors")) (*output_tensors)->tensors = NULL;  // a count with no array
+  if (fault("negative_tensors")) (*output_tensors)->num_tensors = -3;
   free(r);
   return RUNTIME_STATUS_SUCCESS;
 }

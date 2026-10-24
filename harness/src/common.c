@@ -172,7 +172,7 @@ void free_tensors(Tensors *t) {
   if (!t) return;
   void *seen[160];
   int n = 0;
-  for (int i = 0; i < t->num_tensors && i < 16; i++) {
+  for (int i = 0; t->tensors && i < t->num_tensors && i < 16; i++) {  // NULL or negative from a runtime: nothing to walk
     void *ptrs[3] = {t->tensors[i].name, t->tensors[i].shape, t->tensors[i].data};
     for (int k = 0; k < 3; k++) {
       int dup = 0;
