@@ -102,7 +102,7 @@ def _test(r: dict, scenarios: dict) -> str:
 
 def render(doc: dict) -> str:
     code, subject, summary = doc["verdict"]["exit_code"], doc["subject"], doc["summary"]
-    verdict_class = {0: "pass", 1: "fail", 2: "blocked"}[code]
+    verdict_class = {0: "pass", 1: "fail", 2: "blocked", 4: "error"}[code]
     kind = subject["kind"]
     tiles = "".join(
         f'<div class="tile" style="border-color:var(--{o}-bg)"><b style="color:var(--{o})">{n}</b>{OUTCOMES[o]}</div>'

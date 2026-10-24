@@ -357,3 +357,17 @@ def test_c1_malformed_output_tensors_fail_the_check_and_do_not_crash_the_harness
     results = _run(build_dir, fault, ["RT-M-08", "RT-M-09", "RT-M-10"], monkeypatch)
     assert results["RT-M-09"].outcome == "fail"
     assert not {r.outcome for r in results.values()} & {"blocked", "error"}, {i: r.message for i, r in results.items()}
+
+
+def test_c2_the_html_report_is_written_when_a_check_crashed(build_dir, tmp_path, monkeypatch):
+    """C2: exit code 4 raised a KeyError in the HTML renderer, so the evidence for the bug report was the one file missing."""
+    from oaax_conformance import registry
+
+    def crash(ctx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(registry.CHECKS, "RT-S-03", crash)
+    out = tmp_path / "out"
+    code = cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1",
+                     "--only", "RT-S-03", "--quiet", "--out", str(out)])
+    assert code == 4 and {p.name for p in out.iterdir()} == {"report.html", "report.json", "junit.xml"}
