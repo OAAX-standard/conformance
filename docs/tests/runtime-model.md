@@ -15,7 +15,7 @@ Tests that send inputs must know what the model takes (names, data types, shapes
 1. `--input NAME:DTYPE:DIMS` for every input (repeatable; `?` for a dynamic dimension): an explicit choice always wins, and the way to describe a
    runtime that takes another data type or layout than the ONNX model (for example uint8 `NHWC` pixels for a float `NCHW` model);
 2. an `oaax-manifest.json` next to the model (the toolchain output described in the 2.1 manifest proposal), using the `native` views;
-3. for an `.onnx` model, the ONNX file itself (`pip install -e ".[onnx]"` from a checkout);
+3. for an `.onnx` model, the ONNX file itself (`uv sync` from a checkout);
 4. otherwise the tests that send requests are `BLOCKED` ("cannot tell what the model takes").
 
 If the runtime rejects the very first request built from the model's own I/O with a type or shape mismatch, the suite cannot tell a wrong runtime from

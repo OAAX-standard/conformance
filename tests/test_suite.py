@@ -121,7 +121,8 @@ def test_exit_codes(build_dir, monkeypatch, tmp_path):
     lib = str(build_dir / "libmock_runtime.so")
     base = ["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--hardware-safe", "--pause", "0",
             "--init-config", "vendor_key=1"]
-    assert cli.main(base) == 0
+    assert cli.main(base) == 2  # --hardware-safe skips some MUSTs (RT-M-18..): INCOMPLETE, never a clean verdict
+    assert cli.main(base + ["--only", "RT-S-01"]) == 0
     monkeypatch.setenv("OAAX_MOCK_FAULT", "bad_version")
     assert cli.main(base + ["--out", str(tmp_path / "out")]) == 1
     assert {p.name for p in (tmp_path / "out").iterdir()} == {"report.html", "report.json", "junit.xml"}

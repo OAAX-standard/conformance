@@ -1,6 +1,6 @@
 """oaax-conformance runtime|toolchain ...
 
-Exit codes: 0 no MUST check failed; 1 a MUST check failed; 2 nothing failed but a MUST check could not run (INCOMPLETE);
+Exit codes: 0 no MUST check failed; 1 a MUST check failed; 2 nothing failed but a MUST check could not run or was skipped (INCOMPLETE);
 3 bad command line, missing file/Docker/image; 4 a check of the suite itself crashed (a bug of the suite); 130 interrupted."""
 import argparse
 import os
@@ -95,6 +95,13 @@ def _validate(args) -> str | None:
         return f"--init-config {bad[0]!r}: expected KEY=VALUE"
     if args.out and Path(args.out).exists() and not Path(args.out).is_dir():
         return f"--out {args.out}: exists and is not a directory"
+    if args.out:  # fail now, not after a run of minutes
+        try:
+            Path(args.out).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return f"--out {args.out}: cannot create it ({e.strerror})"
+        if not os.access(args.out, os.W_OK):
+            return f"--out {args.out}: not writable"
     if args.harness and not Path(args.harness).is_file():
         return f"--harness {args.harness}: no such file"
     if args.timeout is not None and args.timeout < 5:
@@ -201,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except Exception as e:  # a bug of the suite must not look like "a MUST failed" (exit 1)
+        print(f"internal error of the conformance suite ({type(e).__name__}: {e}); please report it with the command line you used", file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":

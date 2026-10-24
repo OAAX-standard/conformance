@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,10 @@ def _is_utf8(raw: bytes) -> bool:
         return False
 
 
+# the lifecycle scenario first runs init/cleanup once, throw-away: a crash there is a crash of the call a check is about
+THROWAWAY_CALLS = {"init_plain": "init", "cleanup_plain": "cleanup"}
+
+
 @dataclass
 class Run:
     scenario: str
@@ -60,7 +65,12 @@ class Run:
 
     @property
     def signal_name(self) -> str | None:
-        return signal.Signals(-self.returncode).name if self.returncode < 0 else None
+        if self.returncode >= 0:
+            return None
+        try:
+            return signal.Signals(-self.returncode).name
+        except ValueError:  # real-time signals (SIGRTMIN+n) are not in the enum
+            return f"signal {-self.returncode}"
 
     @property
     def end(self) -> str | None:
@@ -86,14 +96,14 @@ class Run:
 
     def how_it_ended(self) -> str:
         if self.timed_out:
-            return f"did not finish within {self.timeout} s"
+            return f"stalled for {self.timeout} s (or took over {self.timeout * TOTAL_FACTOR} s in all)"
         return f"crashed ({self.signal_name})" if self.returncode < 0 else f"ended the process (exit code {self.returncode})"
 
     def step(self, name: str) -> dict:
         for line in self.lines:
             if line.get("step") == name:
                 return line
-        if self.crashed_in == name:
+        if THROWAWAY_CALLS.get(self.crashed_in, self.crashed_in) == name:
             if self.timed_out:  # the spec sets no time limit for a call: a slow device is not a failing one
                 raise Blocked(f"the call {name} {self.how_it_ended()}: a slow device or a hang? raise --timeout if the device is just slow")
             raise Fail(f"the call {name} {self.how_it_ended()}")
@@ -125,10 +135,11 @@ class Run:
         if end == "model":
             load = next((l for l in self.lines if str(l.get("step", "")).startswith("load") and l.get("status")), {})
             return f"the runtime could not load the model given with --model (status {load.get('status')}{self._err(('load', 'load_first', 'load_one'))})"
+        if self.timed_out:
+            where = f" in the call {self.crashed_in}" if self.crashed_in else ""
+            return f"the scenario {self.how_it_ended()}{where} before {name}: a slow device? raise --timeout"
         if self.crashed_in:
             return f"the scenario {self.how_it_ended()} in {self.crashed_in}"
-        if self.timed_out:
-            return f"the scenario {self.how_it_ended()} before {name}: a slow device? raise --timeout"
         return f"the scenario {self.how_it_ended()} before {name}"
 
     def observations(self) -> list[dict]:
@@ -167,14 +178,42 @@ class Run:
         return value
 
 
-def _tail(path: Path) -> str:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - TAIL))
-            return f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
+class TailCapture:
+    """The last `limit` bytes of what a child process prints. A pipe read by a thread, never a file: a runtime (or a toolchain) that prints without
+    end would fill the host's disk, and the suite's temp directories with it. A helper that outlives the child holds the pipe open: nobody waits for EOF."""
+
+    def __init__(self, limit: int = TAIL):
+        self.limit, self._tail = limit, b""
+        self._read, self.write_fd = os.pipe()
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self._read, 1 << 16)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self._tail = (self._tail + chunk)[-self.limit:]
+
+    def child_started(self) -> None:
+        os.close(self.write_fd)  # the child has its own copy: EOF arrives when it (and its helpers) are gone
+
+    def abandon(self) -> None:
+        """Before an error leaves: the child never started, so nobody else holds the write end."""
+        for fd in (self.write_fd,):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def value(self) -> bytes:
+        self._thread.join(timeout=2)
+        if not self._thread.is_alive():
+            os.close(self._read)
+        return self._tail
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -195,33 +234,58 @@ def _stop(proc: subprocess.Popen) -> None:
         pass
 
 
+TOTAL_FACTOR = 6  # a scenario may take this many timeouts in all, as long as no single call stalls
+
+
+def _wait_while_progressing(proc, observations: Path, timeout: int) -> bool:
+    """True when the process ended. The timeout is the longest a single call may take, not the length of the scenario: the harness writes a line
+    before every call and after it, so a slow device (a 76 s init, four times) is not cut off while each call is still finishing."""
+    started = last_progress = time.monotonic()
+    size = 0
+    while True:
+        try:
+            proc.wait(timeout=0.5)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        grown = observations.stat().st_size if observations.exists() else 0
+        if grown != size:
+            size, last_progress = grown, now
+        if now - last_progress > timeout or now - started > TOTAL_FACTOR * timeout:
+            return False
+
+
 def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeout: int, extra: list[str] = (), workdir: str | None = None) -> Run:
     own_dir = tempfile.TemporaryDirectory() if workdir is None else None  # runtimes drop log files into their working directory
     cwd = Path(workdir) if workdir else Path(own_dir.name)
     scratch = tempfile.TemporaryDirectory()
     try:
         scratch_dir = Path(scratch.name)
-        out, stdout, stderr = scratch_dir / "observations.jsonl", scratch_dir / "stdout", scratch_dir / "stderr"
+        out = scratch_dir / "observations.jsonl"
         cmd = [harness, scenario, lib, "--out", str(out), "--budget-ms", str(int(timeout * 600)), *extra]
         for pair in config:
             cmd += ["-c", pair]
         timed_out, started = False, time.monotonic()
-        # output goes to files, not pipes: a runtime that forks a helper keeps a pipe open for as long as the helper lives
-        with open(stdout, "wb") as o, open(stderr, "wb") as e:
-            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=o, stderr=e, start_new_session=True)
+        stdout, stderr = TailCapture(), TailCapture()  # bounded: see TailCapture
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout.write_fd, stderr=stderr.write_fd, start_new_session=True)
+        except BaseException:
+            stdout.abandon(), stderr.abandon()
+            raise
+        stdout.child_started(), stderr.child_started()
+        try:
+            timed_out = not _wait_while_progressing(proc, out, timeout)
+            if timed_out:
+                _stop(proc)
+        except BaseException:
+            _stop(proc)
+            raise
+        if not timed_out:
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _stop(proc)
-            except BaseException:
-                _stop(proc)
-                raise
-            else:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
-                except ProcessLookupError:
-                    pass
+                os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
+            except ProcessLookupError:
+                pass
         text = out.read_text(errors="replace") if out.exists() else ""
         lines = []
         for line in text.splitlines():
@@ -229,7 +293,8 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 lines.append(json.loads(line))
             except ValueError:
                 pass  # a half-written last line of a killed process
-        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, _tail(stdout), _tail(stderr))
+        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout,
+                   stdout.value().decode("utf-8", errors="replace"), stderr.value().decode("utf-8", errors="replace"))
     finally:
         scratch.cleanup()
         if own_dir:

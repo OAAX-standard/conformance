@@ -180,3 +180,40 @@ def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_p
     assert proc.wait(timeout=60) == 130
     assert listing() == []
     assert b"Traceback" not in proc.stderr.read()
+
+
+def test_b2_a_docker_failure_is_blocked_never_a_verdict(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """B2: a bad --docker-arg makes `docker run` exit 125; no negative test may pass and no MUST may fail because of it."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    ctx.docker_args = ["--bogus-flag"]
+    results = _run(ctx, ["TC-01", "TC-10", "TC-11", "TC-30", "TC-35", "TC-38", "TC-39"])
+    assert {r.outcome for r in results.values()} == {"blocked"}  # TC-11 runs in threads: no lost exception, no ERROR
+    assert "docker could not start" in results["TC-10"].message
+
+
+def test_b4_symlinks_are_listed_never_followed_nor_read(tmp_path):
+    """B4: a link to a host file is not a model or a log, and is not hashed (it was read on the host)."""
+    from oaax_conformance.toolchain import tree
+
+    (tmp_path / "real.bin").write_bytes(b"x" * (3 << 20))
+    (tmp_path / "outside.txt").write_text("host secret")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "model.bin").symlink_to(tmp_path / "real.bin")
+    (out / "logs.json").symlink_to(tmp_path / "outside.txt")
+    entries = tree(out)
+    assert all("link" in e and "sha256" not in e for e in entries.values())
+    assert len(tree(tmp_path)["real.bin"]["sha256"]) == 64
+    from types import SimpleNamespace
+
+    from oaax_conformance.toolchain import Conversion
+
+    run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1}})
+    assert list(Conversion.files(run)) == ["ok.onnx"]  # links are neither models nor logs
+
+
+def test_b8_a_slow_toolchain_is_blocked_with_a_hint_not_failed(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 5
+    results = _run(ctx, ["TC-01", "TC-30"])
+    assert {r.outcome for r in results.values()} == {"blocked"} and "--timeout" in results["TC-01"].message

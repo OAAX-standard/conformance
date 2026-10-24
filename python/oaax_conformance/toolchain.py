@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -16,6 +17,11 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .harness import TailCapture
+from .registry import Blocked
+
+DOCKER_ERROR = 125  # `docker run` exit code for its own failures (not the container's)
 
 ARBITRARY_UID = "12345:12345"
 LOG_NAMES = ("conversion-log.json", "logs.json")
@@ -42,7 +48,11 @@ def inspect(image: str) -> dict:
 
 
 def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as f:  # chunked: a compiled model can be several GB
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def tree(root: Path) -> dict[str, dict]:
@@ -50,8 +60,10 @@ def tree(root: Path) -> dict[str, dict]:
     entries = {}
     for path in sorted(root.rglob("*")):
         st = path.lstat()
-        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": path.is_dir(), "uid": st.st_uid}
-        if path.is_file():
+        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid}
+        if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
+            entry["link"] = os.readlink(path)
+        elif stat.S_ISREG(st.st_mode):
             try:
                 entry["sha256"] = _digest(path)
             except OSError:
@@ -114,7 +126,7 @@ class Conversion:
         """Files of the result directory, relative to it."""
         prefix = str(Path(self.out_path).relative_to("/output"))
         prefix = "" if prefix == "." else prefix + "/"
-        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"]}
+        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"] and "link" not in v}
 
     def log_files(self) -> list[str]:
         return [n for n in self.files() if n in LOG_NAMES]
@@ -171,6 +183,7 @@ class ToolchainContext:
     leftovers: list = field(default_factory=list)
     used: list = field(default_factory=list)
     _runs: dict = field(default_factory=dict)
+    docker_failure: str = ""  # set when `docker run` itself failed
     _inspect: dict | None = None
     _dump: str | None = None
     progress: bool = False  # print each conversion to stderr as it starts
@@ -210,6 +223,8 @@ class ToolchainContext:
                 user: str | None = None, network: bool = True, read_only_rootfs: bool = False, ro_input: bool = False, ro_output: bool = False,
                 argv: list[str] | None = None, workspace: Workspace | None = None, keep_container: bool = False) -> "Conversion":
         """Run the toolchain once. `argv` replaces the two normal arguments (wrong argument counts); `content` is the input file."""
+        if self.docker_failure:  # docker itself cannot start containers: no run can say anything about the toolchain
+            raise Blocked(self.docker_failure)
         if name in self._runs:
             return self._runs[name]
         if self.progress:
@@ -228,26 +243,26 @@ class ToolchainContext:
         container = cmd[cmd.index("--name") + 1]
         if keep_container:
             cmd.remove("--rm")  # so that `docker diff` can still list what the toolchain changed inside the container
-        with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+        out_capture, err_capture = TailCapture(20000), TailCapture(20000)  # bounded: an image that prints without end must not fill the disk
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_capture.write_fd, stderr=err_capture.write_fd)
+        except BaseException:
+            out_capture.abandon(), err_capture.abandon()
+            raise
+        out_capture.child_started(), err_capture.child_started()
+        try:
             try:
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_file, stderr=err_file)
-                try:
-                    code = proc.wait(timeout=self.timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out, code = True, -signal.SIGKILL
-                    proc.kill()
-                    proc.wait()
-            except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
-                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-                raise
-            if timed_out:
-                subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-            out_file.seek(0, 2)
-            out_file.seek(max(0, out_file.tell() - 20000))
-            out = out_file.read()
-            err_file.seek(0, 2)
-            err_file.seek(max(0, err_file.tell() - 20000))
-            err = err_file.read()
+                code = proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                timed_out, code = True, -signal.SIGKILL
+                proc.kill()
+                proc.wait()
+        except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            raise
+        if timed_out:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        out, err = out_capture.value(), err_capture.value()
         changes = []
         if keep_container:
             diff = subprocess.run(["docker", "diff", container], capture_output=True, text=True).stdout
@@ -257,6 +272,10 @@ class ToolchainContext:
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
                          _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
         self._runs[name] = run
+        if code == DOCKER_ERROR and not out and b"docker" in err.lower():  # docker's own failure (bad --docker-arg, daemon, GPU runtime): a rejection by the toolchain looks different
+            first = (run.stderr.strip().splitlines() or ["no message"])[0][:200]
+            self.docker_failure = f"docker could not start the container (exit {DOCKER_ERROR}: {first}); check the Docker setup and --docker-arg"
+            raise Blocked(self.docker_failure)
         return run
 
     def convert_together(self, name: str, count: int = 2) -> list["Conversion"]:
@@ -267,11 +286,17 @@ class ToolchainContext:
         import threading
 
         def worker(i: int) -> None:
-            results[i] = self.convert(f"{name}-{i}")
+            try:
+                results[i] = self.convert(f"{name}-{i}")
+            except Exception as e:  # a thread's exception would be lost (Blocked: docker could not start)
+                results[i] = e
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
         [t.start() for t in threads]
         [t.join() for t in threads]
+        for r in results:
+            if isinstance(r, Exception):
+                raise r
         self._runs[name] = results
         return results
 

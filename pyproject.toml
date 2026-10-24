@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "oaax-conformance"
 version = "0.1.0"
 description = "OAAX conformance suite"
-requires-python = ">=3.10"
+requires-python = ">=3.12"  # CI runs 3.13 (security fixes until October 2029)
 license = { text = "Apache-2.0" }
 dependencies = ["jsonschema"]
 
@@ -14,6 +14,9 @@ dependencies = ["jsonschema"]
 test = ["pytest", "pytest-xdist"]
 onnx = ["onnx"]
 e2e = ["onnx", "onnxruntime", "numpy"]
+
+[dependency-groups]
+dev = ["oaax-conformance[test,onnx,e2e]"]
 
 [project.scripts]
 oaax-conformance = "oaax_conformance.cli:main"

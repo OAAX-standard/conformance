@@ -4,6 +4,7 @@
 // A "model" is a file that starts with MOCKMODEL. It takes two inputs, "x" FLOAT [1,4] and "scale" FLOAT [1], and returns
 // "y" FLOAT [1,4] (= x * scale) and "sum" FLOAT [1]; a request takes 5 ms. Build variants (CMakeLists.txt) cover missing and
 // extra exports. The faults are listed next to the code they change.
+#include <signal.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
@@ -99,6 +100,9 @@ EXPORT RuntimeStatus runtime_init(Config config) {
   }
   if (fault("require_config") && !has_key) return fail(RUNTIME_STATUS_ERROR, "config required");
   if (fault("slow_init")) sleep_ms(2500);
+  if (fault("hang_init")) sleep_ms(600000);
+  if (fault("spam_init"))  // prints as fast as it can for a while: the suite must keep only the tail
+    for (double end = now_ms() + 1500; now_ms() < end;) fwrite("garbagegarbagegarbagegarbagegarbagegarbagegarbagegarbage\n", 1, 55, stdout);
   if (fault("chatty")) {
     for (int i = 0; i < 400; i++) fprintf(stderr, "mock runtime: noisy line %03d ......................................................\n", i);
     fflush(stderr);
@@ -140,6 +144,7 @@ static void drop_queue(void) {
 }
 
 EXPORT RuntimeStatus runtime_cleanup(void) {
+  if (fault("crash_in_cleanup")) raise(SIGSEGV);
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
   if (!initialized && cleaned_once && fault("cleanup_twice_fails")) return fail(RUNTIME_STATUS_ERROR, "already cleaned up");
   pthread_mutex_lock(&lock);
@@ -392,6 +397,8 @@ EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_ten
   pthread_mutex_unlock(&lock);
   *model_id = r->model_id;
   *output_tensors = make_output(r);
+  if (fault("null_tensors")) (*output_tensors)->tensors = NULL;  // a count with no array
+  if (fault("negative_tensors")) (*output_tensors)->num_tensors = -3;
   free(r);
   return RUNTIME_STATUS_SUCCESS;
 }
