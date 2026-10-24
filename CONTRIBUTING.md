@@ -13,7 +13,7 @@ first: it sets out the guidelines for the whole project, including the sign-off 
 ## Development environment
 
 ```bash
-scripts/build.sh && pip install -e ".[test,onnx,e2e]" && python -m pytest -n auto
+scripts/build.sh && uv sync && uv run pytest -n auto
 ```
 
 To add a test: write it in `docs/tests/` first (level, source clause, pass condition) and get it `approved`, then implement the check in
