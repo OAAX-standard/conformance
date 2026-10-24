@@ -302,3 +302,9 @@ def test_b1_a_real_time_signal_is_named_not_a_traceback(build_dir, monkeypatch):
     assert "40" in Run("x", -40, False).how_it_ended()
     monkeypatch.setattr(cli, "_runtime", lambda args: 1 / 0)  # any other bug of the suite: exit 4, never 1
     assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet"]) == 4
+
+
+def test_b3_a_crash_inside_cleanup_fails_the_cleanup_check(build_dir, monkeypatch):
+    """B3: the first init/cleanup cycle is a throw-away one; a crash in it was only BLOCKED, so the run ended INCOMPLETE instead of FAILED."""
+    results = _run(build_dir, "crash_in_cleanup", ["RT-L-17"], monkeypatch)
+    assert results["RT-L-17"].outcome == "fail" and "SIGSEGV" in results["RT-L-17"].message

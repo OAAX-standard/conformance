@@ -4,6 +4,7 @@
 // A "model" is a file that starts with MOCKMODEL. It takes two inputs, "x" FLOAT [1,4] and "scale" FLOAT [1], and returns
 // "y" FLOAT [1,4] (= x * scale) and "sum" FLOAT [1]; a request takes 5 ms. Build variants (CMakeLists.txt) cover missing and
 // extra exports. The faults are listed next to the code they change.
+#include <signal.h>
 #include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
@@ -140,6 +141,7 @@ static void drop_queue(void) {
 }
 
 EXPORT RuntimeStatus runtime_cleanup(void) {
+  if (fault("crash_in_cleanup")) raise(SIGSEGV);
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
   if (!initialized && cleaned_once && fault("cleanup_twice_fails")) return fail(RUNTIME_STATUS_ERROR, "already cleaned up");
   pthread_mutex_lock(&lock);

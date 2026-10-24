@@ -47,6 +47,10 @@ def _is_utf8(raw: bytes) -> bool:
         return False
 
 
+# the lifecycle scenario first runs init/cleanup once, throw-away: a crash there is a crash of the call a check is about
+THROWAWAY_CALLS = {"init_plain": "init", "cleanup_plain": "cleanup"}
+
+
 @dataclass
 class Run:
     scenario: str
@@ -98,7 +102,7 @@ class Run:
         for line in self.lines:
             if line.get("step") == name:
                 return line
-        if self.crashed_in == name:
+        if THROWAWAY_CALLS.get(self.crashed_in, self.crashed_in) == name:
             if self.timed_out:  # the spec sets no time limit for a call: a slow device is not a failing one
                 raise Blocked(f"the call {name} {self.how_it_ended()}: a slow device or a hang? raise --timeout if the device is just slow")
             raise Fail(f"the call {name} {self.how_it_ended()}")
