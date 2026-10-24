@@ -72,7 +72,7 @@ uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.on
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
 image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
 with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
-(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`.
+(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room.
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 
