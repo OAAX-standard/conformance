@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --locked --python 3.10
+      - run: uv sync --locked --python 3.13
       - run: ./scripts/build.sh
       - run: uv run pytest -n 4 -q
 
@@ -26,6 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --locked --python 3.10 --no-dev --extra test
+      - run: uv sync --locked --python 3.13 --no-dev --extra test
       - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build-asan -j
       - run: OAAX_BUILD_DIR=build-asan ASAN_OPTIONS=detect_leaks=0 uv run --no-sync pytest -q tests/test_suite.py tests/test_regressions.py -k "clean_mock or default_sizes or oversized or runtime_that_holds or aliased"

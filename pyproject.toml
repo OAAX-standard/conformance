@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "oaax-conformance"
 version = "0.1.0"
 description = "OAAX conformance suite"
-requires-python = ">=3.10"
+requires-python = ">=3.13"  # security fixes until October 2029
 license = { text = "Apache-2.0" }
 dependencies = ["jsonschema"]
 
@@ -29,7 +29,3 @@ packages = ["python/oaax_conformance"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.uv]
-# onnxruntime 1.24 ships no CPython 3.10 wheels, and the suite supports 3.10 (Ubuntu 22.04)
-constraint-dependencies = ["onnxruntime<1.24; python_full_version < '3.11'"]
