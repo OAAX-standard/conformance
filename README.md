@@ -38,8 +38,8 @@ Every test carries the spec clause it comes from and a level:
 
 ```bash
 scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
-pip install -e ".[onnx]"               # from a checkout; the wheel does not ship the harness yet
-oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--input NAME:DTYPE:DIMS]... [--hardware-safe] [--out DIR]
+uv sync                                # from a checkout (creates .venv); the wheel does not ship the harness yet
+uv run oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--input NAME:DTYPE:DIMS]... [--hardware-safe] [--out DIR]
 ```
 
 Useful options (all in `--help`): `--model FILE` is a model the runtime can load and enables the tests that send requests. To build them the suite needs
@@ -61,12 +61,12 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
 crashed (a bug of the suite: please report it). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
-injected faults: `python -m pytest`.
+injected faults: `uv run pytest`.
 
 ### Toolchains
 
 ```bash
-oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
+uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
 ```
 
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
