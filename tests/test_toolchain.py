@@ -218,3 +218,17 @@ def test_b8_a_slow_toolchain_is_blocked_with_a_hint_not_failed(build_dir, mock_i
     ctx.timeout = 5
     results = _run(ctx, ["TC-01", "TC-30"])
     assert {r.outcome for r in results.values()} == {"blocked"} and "--timeout" in results["TC-01"].message
+
+
+def test_d3_a_stalled_conversion_blocks_every_check_that_needed_it(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D3: a run killed at --timeout used to make TC-35 (a MUST) and TC-39 PASS and TC-11 blame 'exit code -9'; nothing it left behind proves anything."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 5
+    results = _run(ctx, ["TC-11", "TC-35", "TC-39"])
+    assert {i: r.outcome for i, r in results.items()} == {"TC-11": "blocked", "TC-35": "blocked", "TC-39": "blocked"}
+    assert "--timeout" in results["TC-11"].message
+
+
+def test_d3_tc35_does_not_pass_when_no_bad_input_failed(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "exit0_on_error", tmp_path), ["TC-35"])
+    assert results["TC-35"].outcome == "na", results["TC-35"]

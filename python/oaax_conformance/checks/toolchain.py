@@ -250,14 +250,17 @@ def input_is_a_directory(ctx):
 
 @check("TC-35")
 def failure_log(ctx):
-    missing = []
+    missing, inspected = [], 0
     for kind in ("garbage", "truncated", "missing"):
         run = _bad_input(ctx, kind)
-        if run.returncode == 0 or run.timed_out:
+        if run.returncode == 0:
             continue  # TC-31..33 report that
+        inspected += 1
         problem = _log_problem(run)
         if problem:
             missing.append(f"{kind} input: {problem}")
+    if not inspected:
+        raise NotApplicable("no bad input failed, so there is no failed conversion to look for a log in (see TC-31..33)")
     if missing:
         raise Fail("a failed conversion must leave a log: " + "; ".join(missing))
 

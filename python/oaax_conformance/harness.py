@@ -223,7 +223,7 @@ def uninterruptible():
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    saved = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
         yield
     finally:

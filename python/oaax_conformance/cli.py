@@ -203,11 +203,15 @@ def _toolchain(args) -> int:
 
 
 class Terminated(BaseException):
-    """SIGTERM (a CI timeout, `timeout N`, `kill`): unwinds like Ctrl-C so the harness and the containers are stopped first."""
+    """SIGTERM (a CI timeout, `timeout N`, `kill`) or SIGHUP (a closed terminal, a dropped ssh session): unwinds like Ctrl-C so the harness and the
+    containers are stopped first. The exit code is 128 + the signal, as a shell would report it."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
 
 
 def _terminate(signum, frame):
-    raise Terminated()
+    raise Terminated(signum)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -215,21 +219,22 @@ def main(argv: list[str] | None = None) -> int:
     problem = _validate(args)
     if problem:
         return usage_error(problem)
-    previous = signal.signal(signal.SIGTERM, _terminate) if threading.current_thread() is threading.main_thread() else None
+    main_thread = threading.current_thread() is threading.main_thread()
+    previous = {s: signal.signal(s, _terminate) for s in (signal.SIGTERM, signal.SIGHUP)} if main_thread else {}
     try:
         return _runtime(args) if args.command == "runtime" else _toolchain(args)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
-    except Terminated:
-        print("\nterminated", file=sys.stderr)
-        return 143
+    except Terminated as e:
+        print(f"\nterminated ({signal.Signals(e.signum).name})", file=sys.stderr)
+        return 128 + e.signum
     except Exception as e:  # a bug of the suite must not look like "a MUST failed" (exit 1)
         print(f"internal error of the conformance suite ({type(e).__name__}: {e}); please report it with the command line you used", file=sys.stderr)
         return 4
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 if __name__ == "__main__":

@@ -184,6 +184,7 @@ class ToolchainContext:
     used: list = field(default_factory=list)
     _runs: dict = field(default_factory=dict)
     docker_failure: str = ""  # set when `docker run` itself failed
+    timeouts: dict = field(default_factory=dict)  # conversion name -> why it blocks: it did not finish in time
     live: set = field(default_factory=set)  # names of the containers started and not yet finished
     _inspect: dict | None = None
     _dump: str | None = None
@@ -226,6 +227,8 @@ class ToolchainContext:
         """Run the toolchain once. `argv` replaces the two normal arguments (wrong argument counts); `content` is the input file."""
         if self.docker_failure:  # docker itself cannot start containers: no run can say anything about the toolchain
             raise Blocked(self.docker_failure)
+        if name in self.timeouts:
+            raise Blocked(self.timeouts[name])
         if name in self._runs:
             return self._runs[name]
         if self.progress:
@@ -274,6 +277,9 @@ class ToolchainContext:
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
                          _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+        if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
+            self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"
+            raise Blocked(self.timeouts[name])
         self._runs[name] = run
         if code == DOCKER_ERROR and not out and b"docker" in err.lower():  # docker's own failure (bad --docker-arg, daemon, GPU runtime): a rejection by the toolchain looks different
             first = (run.stderr.strip().splitlines() or ["no message"])[0][:200]

@@ -486,7 +486,8 @@ def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch,
     assert "no test ran" in capsys.readouterr().err
 
 
-def test_d1_sigterm_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch):
+@pytest.mark.parametrize("sig,code", [("SIGTERM", 143), ("SIGHUP", 129)])  # D4: a closed terminal is the same hole as a CI timeout
+def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch, sig, code):
     """D1: a CI timeout (SIGTERM) used to kill only the suite and leave the harness, and the device it holds, running."""
     import shutil
     import signal
@@ -503,8 +504,8 @@ def test_d1_sigterm_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypa
     while len(pgrep()) < 2 and time.monotonic() < deadline:  # the suite itself and its harness both carry the path
         time.sleep(0.2)
     assert len(pgrep()) >= 2, "the harness never started"
-    suite.send_signal(signal.SIGTERM)
-    assert suite.wait(timeout=30) == 143
+    suite.send_signal(getattr(signal, sig))
+    assert suite.wait(timeout=30) == code
     deadline = time.monotonic() + 15
     while pgrep() and time.monotonic() < deadline:
         time.sleep(0.2)
