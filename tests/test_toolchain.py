@@ -180,3 +180,12 @@ def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_p
     assert proc.wait(timeout=60) == 130
     assert listing() == []
     assert b"Traceback" not in proc.stderr.read()
+
+
+def test_b2_a_docker_failure_is_blocked_never_a_verdict(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """B2: a bad --docker-arg makes `docker run` exit 125; no negative test may pass and no MUST may fail because of it."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    ctx.docker_args = ["--bogus-flag"]
+    results = _run(ctx, ["TC-01", "TC-10", "TC-11", "TC-30", "TC-35", "TC-38", "TC-39"])
+    assert {r.outcome for r in results.values()} == {"blocked"}  # TC-11 runs in threads: no lost exception, no ERROR
+    assert "docker could not start" in results["TC-10"].message
