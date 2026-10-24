@@ -60,7 +60,12 @@ class Run:
 
     @property
     def signal_name(self) -> str | None:
-        return signal.Signals(-self.returncode).name if self.returncode < 0 else None
+        if self.returncode >= 0:
+            return None
+        try:
+            return signal.Signals(-self.returncode).name
+        except ValueError:  # real-time signals (SIGRTMIN+n) are not in the enum
+            return f"signal {-self.returncode}"
 
     @property
     def end(self) -> str | None:

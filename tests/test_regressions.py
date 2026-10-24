@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import helpers
 import pytest
 from oaax_conformance import cli, report
-from oaax_conformance.harness import run_scenario
+from oaax_conformance.harness import Run, run_scenario
 
 INPUTS = [("x", "FLOAT", (1, 4)), ("scale", "FLOAT", (1,))]
 
@@ -292,3 +292,13 @@ def test_the_clean_mock_passes_at_the_default_sizes(build_dir):
     ctx = helpers.context(build_dir, settle_ms=3000, cycles=50, flood=1000, requests=500, producers=4, per_producer=25, model_cycles=20, lost_after_ms=3000,
                           retrieve_timeout_ms=10000, warmup_ms=120000, timeout=300)
     assert {i: r.outcome for i, r in helpers.run(ctx).items() if r.outcome != "pass"} == {}
+
+
+# ---- adversary round 2 (B1..) -----------------------------------------------------------------------------
+
+
+def test_b1_a_real_time_signal_is_named_not_a_traceback(build_dir, monkeypatch):
+    assert Run("x", -40, False).signal_name == "signal 40" and Run("x", -11, False).signal_name == "SIGSEGV" and Run("x", 3, False).signal_name is None
+    assert "40" in Run("x", -40, False).how_it_ended()
+    monkeypatch.setattr(cli, "_runtime", lambda args: 1 / 0)  # any other bug of the suite: exit 4, never 1
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet"]) == 4

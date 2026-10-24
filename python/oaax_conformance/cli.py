@@ -201,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except Exception as e:  # a bug of the suite must not look like "a MUST failed" (exit 1)
+        print(f"internal error of the conformance suite ({type(e).__name__}: {e}); please report it with the command line you used", file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":
