@@ -78,6 +78,14 @@ def _from_onnx(model: Path) -> ModelIO:
     return ModelIO(tuple(tensor(i) for i in graph.input if i.name not in initializers), tuple(tensor(o) for o in graph.output))
 
 
+def _buildable(io: ModelIO) -> ModelIO:
+    """The harness builds a request only for the data types it knows; anything else must be blocked here, not crash the scenario."""
+    for t in io.inputs:
+        if t.dtype not in DTYPES:
+            raise NoModelIO(f"input {t.name!r} has the data type {t.dtype}, which the suite cannot build a request for (supported: {sorted(DTYPES)})")
+    return io
+
+
 def discover(model: str, manual_inputs: list[str]) -> ModelIO:
     if manual_inputs:
         return ModelIO(tuple(parse_arg(a) for a in manual_inputs), ())
@@ -85,7 +93,7 @@ def discover(model: str, manual_inputs: list[str]) -> ModelIO:
     for manifest in sorted(path.parent.glob("oaax-manifest.json")):
         io = _from_manifest(manifest, path)
         if io:
-            return io
+            return _buildable(io)
     if path.suffix == ".onnx":
-        return _from_onnx(path)
+        return _buildable(_from_onnx(path))
     raise NoModelIO("cannot tell what the model takes: put its oaax-manifest.json next to it, or pass --input NAME:DTYPE:DIMS for every input")

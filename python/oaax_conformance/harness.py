@@ -134,10 +134,11 @@ class Run:
         if end == "model":
             load = next((l for l in self.lines if str(l.get("step", "")).startswith("load") and l.get("status")), {})
             return f"the runtime could not load the model given with --model (status {load.get('status')}{self._err(('load', 'load_first', 'load_one'))})"
+        if self.timed_out:
+            where = f" in the call {self.crashed_in}" if self.crashed_in else ""
+            return f"the scenario {self.how_it_ended()}{where} before {name}: a slow device? raise --timeout"
         if self.crashed_in:
             return f"the scenario {self.how_it_ended()} in {self.crashed_in}"
-        if self.timed_out:
-            return f"the scenario {self.how_it_ended()} before {name}: a slow device? raise --timeout"
         return f"the scenario {self.how_it_ended()} before {name}"
 
     def observations(self) -> list[dict]:

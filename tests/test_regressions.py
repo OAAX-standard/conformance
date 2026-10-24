@@ -43,10 +43,10 @@ def test_skip_and_hardware_safe_leave_tests_out(build_dir, tmp_path):
     out = tmp_path / "out"
     base = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"),
             "--init-config", "vendor_key=1", "--quiet", "--pause", "0", "--only", "RT-M-33", "--only", "RT-M-08", "--only", "RT-L-11", "--out", str(out)]
-    assert cli.main(base + ["--skip", "RT-M-08"]) == 0
+    assert cli.main(base + ["--skip", "RT-M-08"]) == 2  # B5: a skipped MUST is never a clean verdict
     outcomes = {r["id"]: r["outcome"] for r in json.loads((out / "report.json").read_text())["results"]}
     assert outcomes["RT-M-08"] == "skipped" and outcomes["RT-M-33"] == "pass"
-    assert cli.main(base + ["--hardware-safe"]) == 0
+    assert cli.main(base + ["--hardware-safe"]) == 0  # the tests it skips are not MUSTs
     doc = json.loads((out / "report.json").read_text())
     assert {r["id"]: r["outcome"] for r in doc["results"]} == {"RT-M-33": "skipped", "RT-M-08": "pass", "RT-L-11": "skipped"}
     assert "hardware-safe" in next(r["message"] for r in doc["results"] if r["id"] == "RT-M-33")
@@ -155,7 +155,8 @@ def test_a_suite_error_has_its_own_exit_code():
     result = lambda o, lv="MUST": report.Result("X", "t", lv, "s", o)  # noqa: E731
     assert report.exit_code([result("error", "PROPOSED")]) == 4
     assert report.exit_code([result("error"), result("fail")]) == 1  # a real MUST failure stands
-    assert report.exit_code([result("skipped"), result("pass")]) == 0
+    assert report.exit_code([result("skipped"), result("pass")]) == 2  # B5: a skipped MUST
+    assert report.exit_code([result("skipped", "SHOULD"), result("pass")]) == 0
 
 
 # ---- A10: one model at a time ---------------------------------------------------------------------------------------
@@ -186,6 +187,10 @@ def test_control_characters_do_not_break_the_xml_report(build_dir, tmp_path, mon
               "--only", "RT-L-05", "--only", "RT-S-09", "--quiet", "--out", str(out)])
     ET.parse(out / "junit.xml")  # well-formed
     assert "\x1b" not in capsys.readouterr().out
+    for name in ("junit.xml", "report.json", "report.html"):  # the message really carried control characters; every format shows them escaped
+        text = (out / name).read_text()
+        assert "\x1b" not in text and "\x01" not in text, name
+        assert "\\x1b" in text or name == "junit.xml", name  # junit carries messages of failed and blocked tests only
 
 
 # ---- A15 / A25: the command line ----------------------------------------------------------------------------------------
@@ -205,7 +210,7 @@ def test_control_characters_do_not_break_the_xml_report(build_dir, tmp_path, mon
     ["toolchain", "x", "--docker-arg=--user=0"],
     ["toolchain", "x", "--docker-arg=--network=host"],
 ])
-def test_a_bad_command_line_exits_with_3_before_running_anything(build_dir, tmp_path, argv):
+def test_a_bad_command_line_exits_with_3_before_running_anything(build_dir, tmp_path, argv, capsys):
     argv = [a.replace("{lib}", str(build_dir / "libmock_runtime.so")) for a in argv]
     if argv[0] == "runtime" and "--harness" not in argv:
         argv += ["--harness", str(build_dir / "oaax-harness")]
@@ -213,6 +218,8 @@ def test_a_bad_command_line_exits_with_3_before_running_anything(build_dir, tmp_
         code = cli.main(argv)
         raise SystemExit(code)
     assert stop.value.code == 3
+    if "--docker-arg" in " ".join(argv):  # refused for the flag, not because image "x" does not exist
+        assert "the suite sets this itself" in capsys.readouterr().err
 
 
 def test_out_that_is_a_file_is_refused(build_dir, tmp_path):
@@ -308,3 +315,32 @@ def test_b3_a_crash_inside_cleanup_fails_the_cleanup_check(build_dir, monkeypatc
     """B3: the first init/cleanup cycle is a throw-away one; a crash in it was only BLOCKED, so the run ended INCOMPLETE instead of FAILED."""
     results = _run(build_dir, "crash_in_cleanup", ["RT-L-17"], monkeypatch)
     assert results["RT-L-17"].outcome == "fail" and "SIGSEGV" in results["RT-L-17"].message
+
+
+def test_b5_hardware_safe_skipping_a_must_is_incomplete(build_dir):
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"),
+                     "--init-config", "vendor_key=1", "--quiet", "--pause", "0", "--hardware-safe", "--only", "RT-M-18"]) == 2
+
+
+def test_b6_an_unwritable_out_is_refused_before_the_run(build_dir, capsys):
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet", "--out", "/proc/nope/out"]) == 3
+    assert "--out" in capsys.readouterr().err
+
+
+def test_b7_an_unknown_input_dtype_is_blocked_not_a_crashed_scenario(build_dir, tmp_path, monkeypatch):
+    ctx = helpers.context(build_dir)
+    ctx.model = helpers.model_variant(tmp_path, [("x", "STRING", (1, 4))])
+    results = helpers.run(ctx, ["RT-M-08"])
+    assert results["RT-M-08"].outcome == "blocked" and "STRING" in results["RT-M-08"].message
+
+
+def test_b9_a_timeout_before_a_call_says_how_to_raise_it(build_dir):
+    run = Run("lifecycle", -9, True, lines=[{"begin": "init_plain"}], timeout=5)
+    assert "--timeout" in run._why_missing("init_unknown_key")
+
+
+def test_b10_the_scenarios_scratch_dir_and_huge_texts_do_not_reach_reports():
+    import tempfile
+
+    text = report.clean_text(f"cannot open {tempfile.gettempdir()}/tmpkqeophgp/dev.cfg " + "x" * 50000)
+    assert "tmpkqeophgp" not in text and "<tmp>/dev.cfg" in text and len(text) < 20100 and "more characters" in text

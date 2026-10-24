@@ -58,7 +58,7 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
   Values given to `--init-config` or `docker -e` are never stored, and directories are removed from every message.
 - `junit.xml`: for CI.
 
-Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run (INCOMPLETE: for
+Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
 crashed (a bug of the suite: please report it). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
 injected faults: `python -m pytest`.

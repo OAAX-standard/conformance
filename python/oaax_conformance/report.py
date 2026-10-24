@@ -3,6 +3,7 @@ import hashlib
 import json
 import platform
 import re
+import tempfile
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -24,13 +25,13 @@ class Result:
 
 
 def exit_code(results: list[Result]) -> int:
-    """0 = clean; 1 = a MUST failed; 2 = nothing failed but a MUST could not run; 4 = a check of the suite itself crashed (3 is used by the CLI
+    """0 = clean; 1 = a MUST failed; 2 = nothing failed but a MUST could not run or was skipped (--skip, --hardware-safe); 4 = a check of the suite itself crashed (3 is used by the CLI
     for a bad command line or a missing Docker). A failed MUST wins over a suite error: that verdict stands."""
     if any(r.outcome == "fail" for r in results):
         return 1
     if any(r.outcome == "error" for r in results):
         return 4
-    return 2 if any(r.outcome == "blocked" and r.level == "MUST" for r in results) else 0
+    return 2 if any(r.outcome in ("blocked", "skipped") and r.level == "MUST" for r in results) else 0
 
 
 COLORS = {"pass": "32", "warn": "33", "fail": "31", "error": "31", "blocked": "36", "skipped": "2", "na": "2"}
@@ -67,12 +68,14 @@ def console(results: list[Result], not_approved: int, color: bool = False, title
     return "\n".join(out)
 
 
-VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run",
+VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST checks could not run or were skipped",
             4: "INTERNAL ERROR: a check of the suite crashed (a bug of the suite, not a verdict on the runtime)"}
 DISCLAIMER = "This run covers only the approved tests; it is not a full conformance claim."
 
 
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
+_SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/tmp\w{6,}")  # the scenario's own working directory (no --workdir) and our workspaces
+MAX_TEXT = 20000  # a runtime can return megabytes of error text
 
 
 def clean_text(text: str, private_paths: list[str] = (), secrets: list[str] = ()) -> str:
@@ -82,6 +85,9 @@ def clean_text(text: str, private_paths: list[str] = (), secrets: list[str] = ()
         text = text.replace(secret, "***")
     for path in sorted({p.rstrip("/") for p in private_paths if p and p.rstrip("/")}, key=len, reverse=True):
         text = text.replace(path + "/", "").replace(path, "<dir>")
+    text = _SCRATCH_DIR.sub("<tmp>", text)
+    if len(text) > MAX_TEXT:
+        text = f"{text[:MAX_TEXT]}... [{len(text) - MAX_TEXT} more characters]"
     return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
 
 

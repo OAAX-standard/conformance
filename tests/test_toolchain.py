@@ -210,3 +210,10 @@ def test_b4_symlinks_are_listed_never_followed_nor_read(tmp_path):
 
     run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1}})
     assert list(Conversion.files(run)) == ["ok.onnx"]  # links are neither models nor logs
+
+
+def test_b8_a_slow_toolchain_is_blocked_with_a_hint_not_failed(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 5
+    results = _run(ctx, ["TC-01", "TC-30"])
+    assert {r.outcome for r in results.values()} == {"blocked"} and "--timeout" in results["TC-01"].message

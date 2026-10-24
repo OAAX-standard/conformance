@@ -18,7 +18,7 @@ def _console_hint(run) -> str:
 
 def _succeeded(run, what: str) -> None:
     if run.timed_out:
-        raise Fail(f"{what}: the toolchain did not finish within the time limit")
+        raise Blocked(f"{what}: the toolchain did not finish within the time limit; the spec sets none, raise --timeout if the model is just big")
     if run.returncode != 0:
         raise Fail(f"{what}: exit code {run.returncode}{_console_hint(run)}")
 
@@ -217,7 +217,7 @@ def _bad_input(ctx, kind: str):
 
 def _must_fail(run, what: str) -> None:
     if run.timed_out:
-        raise Fail(f"{what}: the toolchain did not finish within the time limit")
+        raise Blocked(f"{what}: the toolchain did not finish within the time limit; the spec sets none, raise --timeout if the model is just big")
     if run.returncode == 0:
         files = ", ".join(run.model_files()) or "no model"
         raise Fail(f"{what} was accepted: exit code 0 ({files} written)")
