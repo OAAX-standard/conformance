@@ -232,3 +232,13 @@ def test_d3_a_stalled_conversion_blocks_every_check_that_needed_it(build_dir, mo
 def test_d3_tc35_does_not_pass_when_no_bad_input_failed(build_dir, mock_io_onnx, toolchain_images, tmp_path):
     results = _run(_context(build_dir, mock_io_onnx, CLEAN, "exit0_on_error", tmp_path), ["TC-35"])
     assert results["TC-35"].outcome == "na", results["TC-35"]
+
+
+def test_no_toolchain_check_passes_when_every_conversion_stalls(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """The D3 class as a table: against an image that stalls past --timeout, no check that runs the toolchain may PASS, FAIL or WARN (only the static
+    image checks TC-50..52 look at the image instead; TC-10 is observed for real: the mock rejects a wrong argument count before it reaches the stalling step)."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 2
+    results = _run(ctx)
+    judged = {i: r.outcome for i, r in results.items() if not i.startswith(("TC-50", "TC-51", "TC-52")) and i != "TC-10" and r.outcome in ("pass", "fail", "warn", "error")}
+    assert judged == {}

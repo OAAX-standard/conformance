@@ -33,6 +33,26 @@ class ModelIO:
     outputs: tuple
 
 
+DTYPE_BYTES = {"FLOAT": 4, "UINT8": 1, "INT8": 1, "UINT16": 2, "INT16": 2, "INT32": 4, "INT64": 8, "BOOL": 1, "FLOAT16": 2, "DOUBLE": 8, "UINT32": 4,
+               "UINT64": 8, "BFLOAT16": 2}
+MAX_REQUEST_BYTES = 1 << 30  # the harness builds every request in memory: a bigger one is a typo, not a model
+
+
+def check_inputs(inputs) -> None:
+    """User errors that must not look like a verdict on the runtime: an input named twice, a request too big to build."""
+    names = [t.name for t in inputs]
+    for name in sorted({n for n in names if names.count(n) > 1}):
+        raise NoModelIO(f"the input {name!r} is listed twice")
+    total = 0
+    for t in inputs:
+        elements = 1
+        for d in t.concrete_shape():
+            elements *= d
+        total += elements * DTYPE_BYTES.get(t.dtype, 0)
+    if total > MAX_REQUEST_BYTES:
+        raise NoModelIO(f"one request would take {total / (1 << 30):.1f} GiB of memory (limit {MAX_REQUEST_BYTES >> 30} GiB): check the dimensions")
+
+
 def parse_arg(text: str) -> Tensor:
     """name:DTYPE:d1,d2 (the name may contain ':', so read from the right)."""
     rest, _, dims = text.rpartition(":")
@@ -87,6 +107,12 @@ def _buildable(io: ModelIO) -> ModelIO:
 
 
 def discover(model: str, manual_inputs: list[str]) -> ModelIO:
+    io = _discover(model, manual_inputs)
+    check_inputs(io.inputs)
+    return io
+
+
+def _discover(model: str, manual_inputs: list[str]) -> ModelIO:
     if manual_inputs:
         return ModelIO(tuple(parse_arg(a) for a in manual_inputs), ())
     path = Path(model)

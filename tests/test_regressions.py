@@ -511,3 +511,22 @@ def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeyp
         time.sleep(0.2)
     assert pgrep() == [], "the harness outlived the suite"
     assert b"Traceback" not in suite.stderr.read()
+
+
+def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_dir, capsys, tmp_path):
+    lib = str(build_dir / "libmock_runtime.so")
+    for extra, expect in ((["--input", "x:FLOAT:1,4", "--input", "x:FLOAT:1,4"], "listed twice"), (["--input", "x:FLOAT:100000,100000"], "GiB")):
+        assert cli.main(["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--quiet", *extra]) == 3
+        assert expect in capsys.readouterr().err
+    # the same two mistakes inside a manifest block the model checks instead of failing them
+    ctx = helpers.context(build_dir)
+    ctx.model = helpers.model_variant(tmp_path, [("x", "FLOAT", (1, 4)), ("x", "FLOAT", (1, 4))])
+    result = helpers.run(ctx, ["RT-M-20"])["RT-M-20"]
+    assert result.outcome == "blocked" and "twice" in result.message
+
+
+@pytest.mark.parametrize("option", ["--pause", "--round-trip-timeout"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-1"])
+def test_pause_and_round_trip_timeout_must_be_finite_seconds(build_dir, option, value, capsys):
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", option, value]) == 3
+    assert option in capsys.readouterr().err

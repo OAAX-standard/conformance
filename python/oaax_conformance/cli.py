@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import html_report, report
 from .harness import find_harness
-from .modelio import NoModelIO, parse_arg
+from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
 from .suite import Context, run_suite
 from .toolchain import inspect
@@ -106,6 +106,10 @@ def _validate(args) -> str | None:
             return f"--out {args.out}: not writable"
     if args.harness and not Path(args.harness).is_file():
         return f"--harness {args.harness}: no such file"
+    if args.command == "runtime":
+        for value, what in ((args.pause, "--pause"), (args.round_trip_timeout, "--round-trip-timeout")):
+            if value is not None and not (0 <= value < 86400):  # nan and inf pass a plain comparison and crash later
+                return f"{what} must be a number of seconds between 0 and 86400"
     if args.timeout is not None and args.timeout < 5:
         return "--timeout must be at least 5 seconds"
     if args.command == "runtime":
@@ -115,11 +119,10 @@ def _validate(args) -> str | None:
             return f"--model {args.model}: no such file"
         if args.workdir and not Path(args.workdir).is_dir():
             return f"--workdir {args.workdir}: no such directory"
-        for text in args.input:
-            try:
-                parse_arg(text)
-            except NoModelIO as e:
-                return str(e)
+        try:
+            check_inputs([parse_arg(text) for text in args.input])
+        except NoModelIO as e:
+            return str(e) if str(e).startswith("--input") else f"--input: {e}"
     else:
         if args.onnx and not Path(args.onnx).is_file():
             return f"--onnx {args.onnx}: no such file"
