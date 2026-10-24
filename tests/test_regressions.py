@@ -484,3 +484,29 @@ def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch,
     monkeypatch.setattr(cli, "run_suite", lambda *a, **k: SimpleNamespace(results=[], not_approved=[], leftovers=[]))
     assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
     assert "no test ran" in capsys.readouterr().err
+
+
+def test_d1_sigterm_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch):
+    """D1: a CI timeout (SIGTERM) used to kill only the suite and leave the harness, and the device it holds, running."""
+    import shutil
+    import signal
+    import sys
+    import uuid
+
+    lib = tmp_path / f"libmock-{uuid.uuid4().hex}.so"  # a unique path to find our own harness by
+    shutil.copy(build_dir / "libmock_runtime.so", lib)
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "hang_init")
+    pgrep = lambda: subprocess.run(["pgrep", "-f", str(lib)], capture_output=True, text=True).stdout.split()  # noqa: E731
+    suite = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "runtime", str(lib), "--harness", str(build_dir / "oaax-harness"),
+                              "--init-config", "vendor_key=1", "--only", "RT-L-01", "--quiet", "--timeout", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 20
+    while len(pgrep()) < 2 and time.monotonic() < deadline:  # the suite itself and its harness both carry the path
+        time.sleep(0.2)
+    assert len(pgrep()) >= 2, "the harness never started"
+    suite.send_signal(signal.SIGTERM)
+    assert suite.wait(timeout=30) == 143
+    deadline = time.monotonic() + 15
+    while pgrep() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert pgrep() == [], "the harness outlived the suite"
+    assert b"Traceback" not in suite.stderr.read()

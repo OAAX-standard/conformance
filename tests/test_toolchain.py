@@ -159,7 +159,8 @@ def test_docker_environment_values_never_reach_the_report(build_dir, toolchain_i
     assert "VENDOR_LICENSE=***" in (out / "report.json").read_text()
 
 
-def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_path):
+@pytest.mark.parametrize("only", ["TC-01", "TC-11"])  # TC-11 runs two containers from worker threads: D2
+def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_path, only):
     """A12: an interrupted run must not leave its toolchain container running."""
     import os
     import signal
@@ -169,7 +170,7 @@ def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_p
 
     label = f"oaax-test={uuid.uuid4().hex}"  # parallel tests run containers too: find only this one
     proc = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=hang",
-                             f"--docker-arg=--label={label}", "--only", "TC-01", "--quiet", "--timeout", "120"], start_new_session=True,
+                             f"--docker-arg=--label={label}", "--only", only, "--quiet", "--timeout", "120"], start_new_session=True,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     listing = lambda: subprocess.run(["docker", "ps", "-q", "--filter", f"label={label}"], capture_output=True, text=True).stdout.split()  # noqa: E731
     deadline = time.monotonic() + 40

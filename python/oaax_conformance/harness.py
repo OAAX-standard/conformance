@@ -1,4 +1,5 @@
 """Runs the C harness (one scenario = one process) and reads back what it observed."""
+import contextlib
 import json
 import os
 import shutil
@@ -216,8 +217,27 @@ class TailCapture:
         return self._tail
 
 
+@contextlib.contextmanager
+def uninterruptible():
+    """Cleanup that must finish: a second Ctrl-C (uv forwards one) or a SIGTERM must not abort it and leave a harness or a container running."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for s, handler in saved.items():
+            signal.signal(s, handler)
+
+
 def _stop(proc: subprocess.Popen) -> None:
     """SIGTERM the whole process group (the runtime may have forked helpers), SIGKILL it after a grace period."""
+    with uninterruptible():
+        _stop_group(proc)
+
+
+def _stop_group(proc: subprocess.Popen) -> None:
     for sig, wait in ((signal.SIGTERM, GRACE_SECONDS), (signal.SIGKILL, 5)):
         try:
             os.killpg(proc.pid, sig)

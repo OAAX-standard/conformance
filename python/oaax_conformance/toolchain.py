@@ -18,7 +18,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .harness import TailCapture
+from .harness import TailCapture, uninterruptible
 from .registry import Blocked
 
 DOCKER_ERROR = 125  # `docker run` exit code for its own failures (not the container's)
@@ -184,6 +184,7 @@ class ToolchainContext:
     used: list = field(default_factory=list)
     _runs: dict = field(default_factory=dict)
     docker_failure: str = ""  # set when `docker run` itself failed
+    live: set = field(default_factory=set)  # names of the containers started and not yet finished
     _inspect: dict | None = None
     _dump: str | None = None
     progress: bool = False  # print each conversion to stderr as it starts
@@ -243,6 +244,7 @@ class ToolchainContext:
         container = cmd[cmd.index("--name") + 1]
         if keep_container:
             cmd.remove("--rm")  # so that `docker diff` can still list what the toolchain changed inside the container
+        self.live.add(container)
         out_capture, err_capture = TailCapture(20000), TailCapture(20000)  # bounded: an image that prints without end must not fill the disk
         try:
             proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out_capture.write_fd, stderr=err_capture.write_fd)
@@ -258,11 +260,12 @@ class ToolchainContext:
                 proc.kill()
                 proc.wait()
         except BaseException:  # Ctrl-C, or anything else: the container must not outlive the suite
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            self.remove_live()
             raise
         if timed_out:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+            self.remove_live(container)  # only this one: a parallel conversion may still be running
         out, err = out_capture.value(), err_capture.value()
+        self.live.discard(container)
         changes = []
         if keep_container:
             diff = subprocess.run(["docker", "diff", container], capture_output=True, text=True).stdout
@@ -291,14 +294,25 @@ class ToolchainContext:
             except Exception as e:  # a thread's exception would be lost (Blocked: docker could not start)
                 results[i] = e
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(count)]
+        threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(count)]
         [t.start() for t in threads]
-        [t.join() for t in threads]
+        try:
+            [t.join() for t in threads]
+        except BaseException:  # Ctrl-C reaches this thread only: the workers' own cleanup never runs, and a container may ignore SIGINT
+            self.remove_live()
+            raise
         for r in results:
             if isinstance(r, Exception):
                 raise r
         self._runs[name] = results
         return results
+
+    def remove_live(self, only: str | None = None) -> None:
+        """`docker rm -f` the containers this context started and that have not finished (all, on an interrupt): nothing may outlive the suite."""
+        with uninterruptible():
+            for name in [only] if only else list(self.live):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+                self.live.discard(name)
 
     def close(self) -> None:
         """Remove the temporary directories. A toolchain that creates subdirectories as another uid leaves some we cannot delete: open them up
