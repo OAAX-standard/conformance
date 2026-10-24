@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -46,7 +47,11 @@ def inspect(image: str) -> dict:
 
 
 def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as f:  # chunked: a compiled model can be several GB
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def tree(root: Path) -> dict[str, dict]:
@@ -54,8 +59,10 @@ def tree(root: Path) -> dict[str, dict]:
     entries = {}
     for path in sorted(root.rglob("*")):
         st = path.lstat()
-        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": path.is_dir(), "uid": st.st_uid}
-        if path.is_file():
+        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid}
+        if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
+            entry["link"] = os.readlink(path)
+        elif stat.S_ISREG(st.st_mode):
             try:
                 entry["sha256"] = _digest(path)
             except OSError:
@@ -118,7 +125,7 @@ class Conversion:
         """Files of the result directory, relative to it."""
         prefix = str(Path(self.out_path).relative_to("/output"))
         prefix = "" if prefix == "." else prefix + "/"
-        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"]}
+        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"] and "link" not in v}
 
     def log_files(self) -> list[str]:
         return [n for n in self.files() if n in LOG_NAMES]
