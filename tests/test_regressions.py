@@ -61,6 +61,12 @@ def test_a_slow_first_inference_does_not_fail_the_round_trip(build_dir, monkeypa
     assert {i: r.outcome for i, r in results.items()} == {"RT-M-08": "pass", "RT-M-02": "pass", "RT-M-09": "pass"}
 
 
+def test_a_device_that_is_slow_on_every_request_gets_a_timeout_that_matches(build_dir, monkeypatch):
+    # every request takes 3 s, the round-trip budget is 1.5 s: the first answered request must raise the timeout of the later ones
+    results = _run(build_dir, "slow_every", ["RT-M-08", "RT-M-09"], monkeypatch, warmup_ms=20000)
+    assert {i: r.outcome for i, r in results.items()} == {"RT-M-08": "pass", "RT-M-09": "pass"}
+
+
 def test_a_call_that_stalls_is_blocked_not_failed(build_dir, monkeypatch):
     results = _run(build_dir, "hang_init", ["RT-L-01"], monkeypatch, timeout=5)
     assert results["RT-L-01"].outcome == "blocked" and "--timeout" in results["RT-L-01"].message
@@ -265,7 +271,7 @@ def test_exit_inside_a_call_is_blamed_on_the_call_not_on_loading(build_dir, monk
 # ---- A19 / A20: the harness survives what a runtime returns ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("fault", ["huge_name", "big_size"])
+@pytest.mark.parametrize("fault", ["huge_name", "big_size", "many_huge_outputs"])
 def test_the_harness_does_not_crash_on_oversized_names_or_sizes(build_dir, monkeypatch, fault):
     monkeypatch.setenv("OAAX_MOCK_FAULT", fault)
     run = _scenario(build_dir, "roundtrip", ["-i", "x:FLOAT:1,4", "-i", "scale:FLOAT:1"])
@@ -449,3 +455,115 @@ def test_junit_does_not_show_green_for_an_incomplete_run(tmp_path):
     suite = ET.parse(path).getroot()
     assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == ("4", "0", "2", "1")
     assert [c.find("error") is not None for c in suite.iter("testcase")] == [False, True, False, True]
+
+
+# ---- round 4: the tests that stayed green when their fix was undone (round 3 mutation check) -----------------------------
+
+
+def test_the_warmup_wait_is_capped_after_an_unanswered_first_request(build_dir, monkeypatch):
+    from oaax_conformance import suite
+    from oaax_conformance.harness import Run
+
+    ctx = helpers.context(build_dir, warmup_ms=120000)
+    monkeypatch.setattr(suite, "run_scenario", lambda *a, **k: Run("roundtrip", 0, False, [{"step": "warmup", "status": 6}]))
+    ctx.run("roundtrip")
+    assert ctx.warmup_ms == 10000, "the next scenario must not wait the full warm-up again"
+
+
+def test_the_lost_after_window_follows_the_first_answered_request(build_dir, monkeypatch):
+    """Accepted-and-answered must not be reported as 'silently lost' because the harness's own window was shorter than the device's pace."""
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "any_shape")
+    ctx = helpers.context(build_dir, lost_after_ms=1)
+    result = helpers.run(ctx, ["RT-M-23"])["RT-M-23"]
+    assert result.outcome == "fail" and "and answered" in result.message, result
+
+
+def test_the_byte_cap_holds_in_the_concurrency_scenario_too(build_dir, monkeypatch):
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "any_shape")  # takes any size: 4 MB per request
+    run = _scenario(build_dir, "concurrency", ["--producers", "50", "--per-producer", "100", "-i", "x:FLOAT:262144,4", "-i", "scale:FLOAT:1"])
+    assert run.step("run")["expected"] <= 70  # 256 MB / 4 MB = 64 (5000 were asked for)
+
+
+def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cli, "run_suite", lambda *a, **k: SimpleNamespace(results=[], not_approved=[], leftovers=[]))
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    assert "no test ran" in capsys.readouterr().err
+
+
+def test_only_with_a_draft_test_id_exits_3_not_0(build_dir, tmp_path, monkeypatch, capsys):
+    """The real path, no stub: a draft test is a known id that runs nothing, and "0 checks" must not look like a pass."""
+    from oaax_conformance import specdocs
+
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    for f in (specdocs.spec_dir()).glob("*.md"):
+        (specs / f.name).write_text(f.read_text())
+    text = (specs / "runtime-static-lifecycle.md").read_text()
+    row = next(l for l in text.splitlines() if l.startswith("| RT-S-01 |"))
+    (specs / "runtime-static-lifecycle.md").write_text(text.replace(row, row.rsplit("approved", 1)[0] + "draft |"))
+    monkeypatch.setattr(specdocs, "spec_dir", lambda: specs)
+    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", "--only", "RT-S-01"]
+    assert cli.main(argv) == 3
+    assert "no test ran" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("sig,code", [("SIGTERM", 143), ("SIGHUP", 129)])  # D4: a closed terminal is the same hole as a CI timeout
+def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch, sig, code):
+    """D1: a CI timeout (SIGTERM) used to kill only the suite and leave the harness, and the device it holds, running."""
+    import shutil
+    import signal
+    import sys
+    import uuid
+
+    lib = tmp_path / f"libmock-{uuid.uuid4().hex}.so"  # a unique path to find our own harness by
+    shutil.copy(build_dir / "libmock_runtime.so", lib)
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "hang_init")
+    pgrep = lambda: subprocess.run(["pgrep", "-f", str(lib)], capture_output=True, text=True).stdout.split()  # noqa: E731
+    suite = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "runtime", str(lib), "--harness", str(build_dir / "oaax-harness"),
+                              "--init-config", "vendor_key=1", "--only", "RT-L-01", "--quiet", "--timeout", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 20
+    while len(pgrep()) < 2 and time.monotonic() < deadline:  # the suite itself and its harness both carry the path
+        time.sleep(0.2)
+    assert len(pgrep()) >= 2, "the harness never started"
+    suite.send_signal(getattr(signal, sig))
+    assert suite.wait(timeout=30) == code
+    deadline = time.monotonic() + 15
+    while pgrep() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert pgrep() == [], "the harness outlived the suite"
+    assert b"Traceback" not in suite.stderr.read()
+
+
+def test_a_hangup_that_nohup_ignored_stays_ignored(build_dir, monkeypatch):
+    import signal
+
+    seen = {}
+    monkeypatch.setattr(cli, "_runtime", lambda args: seen.update(hup=signal.getsignal(signal.SIGHUP), term=signal.getsignal(signal.SIGTERM)) or 0)
+    old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        assert cli.main(["runtime", str(build_dir / "libmock_runtime.so")]) == 0
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN  # restored as it was
+    finally:
+        signal.signal(signal.SIGHUP, old)
+    assert seen["hup"] is signal.SIG_IGN and seen["term"] is cli._terminate
+
+
+def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_dir, capsys, tmp_path):
+    lib = str(build_dir / "libmock_runtime.so")
+    for extra, expect in ((["--input", "x:FLOAT:1,4", "--input", "x:FLOAT:1,4"], "listed twice"), (["--input", "x:FLOAT:100000,100000"], "GiB")):
+        assert cli.main(["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--quiet", *extra]) == 3
+        assert expect in capsys.readouterr().err
+    # the same two mistakes inside a manifest block the model checks instead of failing them
+    ctx = helpers.context(build_dir)
+    ctx.model = helpers.model_variant(tmp_path, [("x", "FLOAT", (1, 4)), ("x", "FLOAT", (1, 4))])
+    result = helpers.run(ctx, ["RT-M-20"])["RT-M-20"]
+    assert result.outcome == "blocked" and "twice" in result.message
+
+
+@pytest.mark.parametrize("option", ["--pause", "--round-trip-timeout"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-1"])
+def test_pause_and_round_trip_timeout_must_be_finite_seconds(build_dir, option, value, capsys):
+    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", option, value]) == 3
+    assert option in capsys.readouterr().err

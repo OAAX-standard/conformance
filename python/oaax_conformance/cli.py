@@ -1,16 +1,18 @@
 """oaax-conformance runtime|toolchain ...
 
 Exit codes: 0 no MUST check failed; 1 a MUST check failed; 2 nothing failed but a MUST check could not run or was skipped (INCOMPLETE);
-3 bad command line, missing file/Docker/image; 4 a check of the suite itself crashed (a bug of the suite); 130 interrupted."""
+3 bad command line, missing file/Docker/image; 4 a check of the suite itself crashed (a bug of the suite); 130 / 143 / 129 stopped by Ctrl-C / SIGTERM / SIGHUP."""
 import argparse
 import os
+import signal
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 
 from . import html_report, report
 from .harness import find_harness
-from .modelio import NoModelIO, parse_arg
+from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
 from .suite import Context, run_suite
 from .toolchain import inspect
@@ -104,6 +106,10 @@ def _validate(args) -> str | None:
             return f"--out {args.out}: not writable"
     if args.harness and not Path(args.harness).is_file():
         return f"--harness {args.harness}: no such file"
+    if args.command == "runtime":
+        for value, what in ((args.pause, "--pause"), (args.round_trip_timeout, "--round-trip-timeout")):
+            if value is not None and not (0 <= value < 86400):  # nan and inf pass a plain comparison and crash later
+                return f"{what} must be a number of seconds between 0 and 86400"
     if args.timeout is not None and args.timeout < 5:
         return "--timeout must be at least 5 seconds"
     if args.command == "runtime":
@@ -113,11 +119,10 @@ def _validate(args) -> str | None:
             return f"--model {args.model}: no such file"
         if args.workdir and not Path(args.workdir).is_dir():
             return f"--workdir {args.workdir}: no such directory"
-        for text in args.input:
-            try:
-                parse_arg(text)
-            except NoModelIO as e:
-                return str(e)
+        try:
+            check_inputs([parse_arg(text) for text in args.input])
+        except NoModelIO as e:
+            return str(e) if str(e).startswith("--input") else f"--input: {e}"
     else:
         if args.onnx and not Path(args.onnx).is_file():
             return f"--onnx {args.onnx}: no such file"
@@ -130,6 +135,8 @@ def _validate(args) -> str | None:
 
 
 def _print_and_write(suite, args, title: str, document, paths: list[str], secrets: list[str]) -> int:
+    if not suite.results:  # e.g. --only names only draft tests: "0 checks, exit 0" must never look like a pass
+        return usage_error("no test ran: the selection matches no approved test (see docs/tests)")
     shown = report.scrub_results(suite.results, paths, secrets)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
     print(report.console(shown, suite.not_approved, color, title))
@@ -198,19 +205,41 @@ def _toolchain(args) -> int:
                             paths, secrets)
 
 
+class Terminated(BaseException):
+    """SIGTERM (a CI timeout, `timeout N`, `kill`) or SIGHUP (a closed terminal, a dropped ssh session): unwinds like Ctrl-C so the harness and the
+    containers are stopped first. The exit code is 128 + the signal, as a shell would report it."""
+
+    def __init__(self, signum: int):
+        self.signum = signum
+
+
+def _terminate(signum, frame):
+    raise Terminated(signum)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     problem = _validate(args)
     if problem:
         return usage_error(problem)
+    main_thread = threading.current_thread() is threading.main_thread()
+    # `nohup oaax-conformance ...` ignores SIGHUP on purpose: keep it ignored
+    caught = [signal.SIGTERM] + ([] if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else [signal.SIGHUP])
+    previous = {s: signal.signal(s, _terminate) for s in caught} if main_thread else {}
     try:
         return _runtime(args) if args.command == "runtime" else _toolchain(args)
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except Terminated as e:
+        print(f"\nterminated ({signal.Signals(e.signum).name})", file=sys.stderr)
+        return 128 + e.signum
     except Exception as e:  # a bug of the suite must not look like "a MUST failed" (exit 1)
         print(f"internal error of the conformance suite ({type(e).__name__}: {e}); please report it with the command line you used", file=sys.stderr)
         return 4
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 if __name__ == "__main__":

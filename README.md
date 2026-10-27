@@ -60,7 +60,7 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
 
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
-crashed (a bug of the suite: please report it). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
+crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
 injected faults: `uv run pytest`.
 
 ### Toolchains
@@ -72,7 +72,7 @@ uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.on
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
 image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
 with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
-(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room.
+(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 

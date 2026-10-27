@@ -301,7 +301,7 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     static int corrupt_count;
     if (fault("corrupt_every_7th") && ++corrupt_count % 7 == 0) r->y[0] += 1.0f;
     if (fault("wrong_output")) r->y[0] += 1.0f;
-    r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0);
+    r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0) + (fault("slow_every") ? 3000 : 0);
     first_request_done = 1;
   }
   pthread_mutex_lock(&lock);
@@ -345,6 +345,17 @@ static Tensors *make_output(const struct Request *r) {
   if (fault("output_aliased")) {
     free(t->tensors[1].data);
     t->tensors[1].data = t->tensors[0].data;  // two descriptors, one buffer: the host would free it twice
+  }
+  if (fault("many_huge_outputs")) {  // 16 outputs with 5000-byte names: the harness's description of them is longer than its buffer
+    t->tensors = realloc(t->tensors, 16 * sizeof *t->tensors);
+    for (int i = 2; i < 16; i++) fill_descriptor(&t->tensors[i], "sum", 2, 1, &r->sum);
+    t->num_tensors = 16;
+    for (int i = 0; i < 16; i++) {
+      free(t->tensors[i].name);
+      t->tensors[i].name = malloc(5001);
+      memset(t->tensors[i].name, 'a' + i, 5000);
+      t->tensors[i].name[5000] = 0;
+    }
   }
   if (fault("bad_data_size")) t->tensors[0].data_size = 8;
   if (fault("big_size")) t->tensors[0].data_size = 1600000;  // claims far more than it allocated

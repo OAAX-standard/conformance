@@ -159,7 +159,8 @@ def test_docker_environment_values_never_reach_the_report(build_dir, toolchain_i
     assert "VENDOR_LICENSE=***" in (out / "report.json").read_text()
 
 
-def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_path):
+@pytest.mark.parametrize("only", ["TC-01", "TC-11"])  # TC-11 runs two containers from worker threads: D2
+def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_path, only):
     """A12: an interrupted run must not leave its toolchain container running."""
     import os
     import signal
@@ -169,7 +170,7 @@ def test_ctrl_c_removes_the_running_container(build_dir, toolchain_images, tmp_p
 
     label = f"oaax-test={uuid.uuid4().hex}"  # parallel tests run containers too: find only this one
     proc = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=hang",
-                             f"--docker-arg=--label={label}", "--only", "TC-01", "--quiet", "--timeout", "120"], start_new_session=True,
+                             f"--docker-arg=--label={label}", "--only", only, "--quiet", "--timeout", "120"], start_new_session=True,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     listing = lambda: subprocess.run(["docker", "ps", "-q", "--filter", f"label={label}"], capture_output=True, text=True).stdout.split()  # noqa: E731
     deadline = time.monotonic() + 40
@@ -217,3 +218,27 @@ def test_b8_a_slow_toolchain_is_blocked_with_a_hint_not_failed(build_dir, mock_i
     ctx.timeout = 5
     results = _run(ctx, ["TC-01", "TC-30"])
     assert {r.outcome for r in results.values()} == {"blocked"} and "--timeout" in results["TC-01"].message
+
+
+def test_d3_a_stalled_conversion_blocks_every_check_that_needed_it(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D3: a run killed at --timeout used to make TC-35 (a MUST) and TC-39 PASS and TC-11 blame 'exit code -9'; nothing it left behind proves anything."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 5
+    results = _run(ctx, ["TC-11", "TC-35", "TC-39"])
+    assert {i: r.outcome for i, r in results.items()} == {"TC-11": "blocked", "TC-35": "blocked", "TC-39": "blocked"}
+    assert "--timeout" in results["TC-11"].message
+
+
+def test_d3_tc35_does_not_pass_when_no_bad_input_failed(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "exit0_on_error", tmp_path), ["TC-35"])
+    assert results["TC-35"].outcome == "na", results["TC-35"]
+
+
+def test_no_toolchain_check_passes_when_every_conversion_stalls(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """The D3 class as a table: against an image that stalls past --timeout, no check that runs the toolchain may PASS, FAIL or WARN (only the static
+    image checks TC-50..52 look at the image instead; TC-10 is observed for real: the mock rejects a wrong argument count before it reaches the stalling step)."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path)
+    ctx.timeout = 2
+    results = _run(ctx)
+    judged = {i: r.outcome for i, r in results.items() if not i.startswith(("TC-50", "TC-51", "TC-52")) and i != "TC-10" and r.outcome in ("pass", "fail", "warn", "error")}
+    assert judged == {}

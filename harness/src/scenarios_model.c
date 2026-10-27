@@ -173,6 +173,7 @@ static void add(char *buf, size_t *n, size_t size, const char *fmt, ...) {
 
 // What the runtime returned, as JSON members: routing, allocation, sizes, a hash of the data. Never reads more bytes than
 // shape x element size says (a runtime that reports a bigger data_size must not crash the harness).
+// Names are cut at 1024 bytes: 16 outputs must still fit the buffer, a truncated line would not be valid JSON.
 static void describe(const Tensors *o, char *buf, size_t size, uint64_t *hash_out) {
   size_t n = 0;
   const void *ptrs[96];
@@ -190,7 +191,7 @@ static void describe(const Tensors *o, char *buf, size_t size, uint64_t *hash_ou
     add(buf, &n, size, "%s{\"name\":", i ? "," : "");
     if (d->name) {
       add(buf, &n, size, "\"");
-      for (const char *p = d->name; *p && n + 8 < size && p - d->name < 4096; p++) add(buf, &n, size, "%02x", (unsigned char)*p);
+      for (const char *p = d->name; *p && n + 8 < size && p - d->name < 1024; p++) add(buf, &n, size, "%02x", (unsigned char)*p);
       add(buf, &n, size, "\"");
     } else add(buf, &n, size, "null");
     add(buf, &n, size, ",\"dtype\":%d,\"rank\":%d,\"shape\":[", d->data_type, d->rank);
