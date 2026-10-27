@@ -25,8 +25,13 @@ def say(text: str) -> None:
 
 def write_log(out: str, ok: bool, message: str) -> None:
     if os.path.isdir(out) and not (fault("no_log") or (not ok and fault("no_log_on_failure"))):
+        if fault("fifo_log"):  # a named pipe where the log should be: whoever opens it blocks forever
+            os.mkfifo(os.path.join(out, "logs.json"))
+            return
         with open(os.path.join(out, "logs.json"), "w") as f:
             f.write("not json" if fault("bad_json_log") else json.dumps([{"Message": message, "Data": {"ok": ok}}]))
+            if fault("huge_log"):  # sparse: no disk is used
+                f.truncate(2 << 20)
 
 
 def fail(out: str, message: str, code: int = 1) -> int:

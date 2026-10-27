@@ -295,3 +295,31 @@ def test_model_file_must_stay_inside_the_output_directory(build_dir, name):
     from oaax_conformance import cli
 
     assert cli.main(["toolchain", "x", "--model-file", name]) == 3
+
+
+# ---- round 5, A13: files the toolchain writes are not trusted -----------------------------------------------------------------------------
+
+def test_a_named_pipe_where_the_log_should_be_does_not_hang_the_suite(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A13a: logs.json as a FIFO made read_text() block forever (only SIGTERM ended the run, no report); only regular files are listed and opened now."""
+    import signal
+
+    def stuck(*_):
+        raise AssertionError("the suite blocked reading a named pipe")
+
+    old = signal.signal(signal.SIGALRM, stuck)
+    signal.alarm(60)
+    try:
+        result = _run(_context(build_dir, mock_io_onnx, CLEAN, "fifo_log", tmp_path, with_runtime=False), ["TC-21"])["TC-21"]
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert result.outcome == "fail" and "no conversion-log.json or logs.json" in result.message
+
+
+def test_a_huge_log_is_reported_not_read_into_memory(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """A13b: a 3 GB logs.json made json.loads(read_text()) use 3 GB and end as 'TC-21 ERROR: MemoryError, a bug of the suite' (here: 2 MB over a 1 MB limit)."""
+    from oaax_conformance.checks import toolchain as checks
+
+    monkeypatch.setattr(checks, "MAX_JSON_BYTES", 1 << 20)
+    result = _run(_context(build_dir, mock_io_onnx, CLEAN, "huge_log", tmp_path, with_runtime=False), ["TC-21"])["TC-21"]
+    assert result.outcome == "warn" and "2 MB" in result.message and "not checked" in result.message

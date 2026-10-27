@@ -60,7 +60,7 @@ def tree(root: Path) -> dict[str, dict]:
     entries = {}
     for path in sorted(root.rglob("*")):
         st = path.lstat()
-        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid}
+        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid, "reg": stat.S_ISREG(st.st_mode)}
         if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
             entry["link"] = os.readlink(path)
         elif stat.S_ISREG(st.st_mode):
@@ -143,7 +143,8 @@ class Conversion:
         """Files of the result directory, relative to it."""
         prefix = str(Path(self.out_path).relative_to("/output"))
         prefix = "" if prefix == "." else prefix + "/"
-        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"] and "link" not in v}
+        # Regular files only: a FIFO, socket or device the toolchain left would block or fool whoever opens it.
+        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and v["reg"]}
 
     def log_files(self) -> list[str]:
         return [n for n in self.files() if n in LOG_NAMES]
