@@ -2,7 +2,7 @@
 import json
 
 from ..harness import status_name
-from ..registry import Blocked, Fail, NotApplicable, check
+from ..registry import Blocked, Fail, NotApplicable, Warn, check
 
 SUCCESS, NO_OUTPUT_AVAILABLE = 0, 12
 TENSOR_SHAPE_MISMATCH, TENSOR_TYPE_MISMATCH, INVALID_MODEL_ID = 10, 11, 18
@@ -182,6 +182,10 @@ def output_names(ctx):
         raise Fail(f"output names {got} differ from the model's {expected}")
 
 
+IMMEDIATE_MS = 100  # "returns immediately", as the fastest of several calls
+SLOW_CLEANUP_MS = 10000
+
+
 # ---- timeouts ------------------------------------------------------------------------------------------------
 
 
@@ -190,8 +194,8 @@ def timeout_zero(ctx):
     obs = _scenario(ctx, "timeouts").step("retrieve_0")
     if obs["status"] != NO_OUTPUT_AVAILABLE:
         raise Fail(f"retrieve_output(0) with nothing in flight returned {_name(obs['status'])}, expected NO_OUTPUT_AVAILABLE")
-    if obs["ms"] > 100:
-        raise Fail(f"retrieve_output(0) took {obs['ms']:.0f} ms instead of returning immediately")
+    if obs["ms"] > IMMEDIATE_MS:  # the fastest of 5 calls: one slow call on a loaded host proves nothing, five do
+        raise Fail(f"retrieve_output(0) took at least {obs['ms']:.0f} ms in each of 5 calls instead of returning immediately")
 
 
 @check("RT-M-14")
@@ -199,8 +203,8 @@ def timeout_positive(ctx):
     obs = _scenario(ctx, "timeouts").step("retrieve_200")
     if obs["status"] != NO_OUTPUT_AVAILABLE:
         raise Fail(f"retrieve_output(200) with nothing in flight returned {_name(obs['status'])}, expected NO_OUTPUT_AVAILABLE")
-    if obs["ms"] > 200 + 1000:
-        raise Fail(f"retrieve_output(200) took {obs['ms']:.0f} ms")
+    if obs["ms"] > 200 + 1000:  # the fastest of 3 calls, for the same reason
+        raise Fail(f"retrieve_output(200) took at least {obs['ms']:.0f} ms in each of 3 calls")
 
 
 @check("RT-M-15")
@@ -348,11 +352,11 @@ def cleanup_with_requests_in_flight(ctx):
     cleanup = run.step("cleanup")
     if cleanup["status"] != SUCCESS:
         raise Fail(f"cleanup with requests in flight returned {_name(cleanup['status'])}")
-    if cleanup["ms"] > 10000:
-        raise Fail(f"cleanup with requests in flight took {cleanup['ms']:.0f} ms")
     if run.step("init_again")["status"] != SUCCESS:
         raise Fail("init after such a cleanup failed")
     _answered(run, "infer_again")
+    if cleanup["ms"] > SLOW_CLEANUP_MS:  # the spec sets no time bound for cleanup: worth knowing, not a failure
+        raise Warn(f"cleanup with requests in flight returned SUCCESS but took {cleanup['ms'] / 1000:.1f} s")
 
 
 @check("RT-M-32")

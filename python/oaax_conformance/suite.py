@@ -8,7 +8,7 @@ import time
 
 from .harness import Run, run_scenario
 from .modelio import ModelIO, NoModelIO, discover
-from .registry import CHECKS, MUST, Blocked, Fail, NotApplicable
+from .registry import CHECKS, MUST, Blocked, Fail, NotApplicable, Warn
 from .report import Result
 from .specdocs import Spec, load
 
@@ -101,6 +101,8 @@ def run_check(spec: Spec, ctx, skip: dict | None = None) -> Result:
         fn(ctx)
     except Fail as e:
         result.outcome, result.message = ("fail" if spec.level == MUST else "warn"), str(e)
+    except Warn as e:
+        result.outcome, result.message = "warn", str(e)
     except Blocked as e:
         result.outcome, result.message = "blocked", str(e)
     except NotApplicable as e:

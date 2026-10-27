@@ -266,14 +266,25 @@ static int roundtrip(const char *step, int model_id, int id) {
   return got;
 }
 
-static void timed_retrieve(const char *step, int timeout_ms) {
+// `samples` calls of the same retrieve; the step reports the fastest (a scheduling hiccup only makes a call longer, so the minimum is what the runtime
+// can do) and the slowest. A call whose status differs from the first one ends the step with that status.
+static void timed_retrieve(const char *step, int timeout_ms, int samples) {
   int model_id = -1;
   Tensors *output = NULL;
+  RuntimeStatus s = RUNTIME_STATUS_SUCCESS, first = RUNTIME_STATUS_SUCCESS;
+  double min_ms = 0, max_ms = 0;
   begin(step);
-  double t0 = now_ms();
-  RuntimeStatus s = rt.retrieve_output(&model_id, &output, timeout_ms);
-  char extra[96];
-  snprintf(extra, sizeof extra, "\"model_id\":%d,\"ms\":%.1f,\"timeout\":%d", model_id, now_ms() - t0, timeout_ms);
+  for (int i = 0; i < samples; i++) {
+    double t0 = now_ms();
+    s = rt.retrieve_output(&model_id, &output, timeout_ms);
+    double ms = now_ms() - t0;
+    if (i == 0 || ms < min_ms) min_ms = ms;
+    if (i == 0 || ms > max_ms) max_ms = ms;
+    if (i == 0) first = s;
+    if (s != first || s == RUNTIME_STATUS_SUCCESS) break;
+  }
+  char extra[160];
+  snprintf(extra, sizeof extra, "\"model_id\":%d,\"ms\":%.1f,\"max_ms\":%.1f,\"timeout\":%d", model_id, min_ms, max_ms, timeout_ms);
   done(step, s, NULL, extra);
   if (s == RUNTIME_STATUS_SUCCESS) free_tensors(output);
 }
@@ -357,15 +368,15 @@ int scenario_roundtrip(void) {
 
 int scenario_timeouts(void) {
   start();
-  timed_retrieve("retrieve_0", 0);
-  timed_retrieve("retrieve_200", 200);
+  timed_retrieve("retrieve_0", 0, 5);
+  timed_retrieve("retrieve_200", 200, 3);
   struct Build valid = {0};
   Tensors *input = build(1, &valid);
   begin("enqueue_one");
   RuntimeStatus s = rt.enqueue_input(0, input);
   done("enqueue_one", s, NULL, NULL);
   if (s != RUNTIME_STATUS_SUCCESS) free_tensors(input);
-  timed_retrieve("retrieve_negative", -1);
+  timed_retrieve("retrieve_negative", -1, 1);
   return finish();
 }
 

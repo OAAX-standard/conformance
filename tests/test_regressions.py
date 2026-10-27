@@ -619,3 +619,37 @@ def test_text_that_xml_cannot_hold_is_escaped_so_junit_stays_parseable(tmp_path)
     report.write_junit(str(path), report.scrub(doc, [], []))
     failure = ET.parse(path).getroot().find("testcase/failure")  # raises on malformed XML
     assert failure.get("message") == "fatal: \\ufffe\\uffff \\ud800 \\x9b[31m \\u202e rest"
+
+
+# ---- round 5, A10: a timing the spec does not bound is never a failure ---------------------------------------------------------------
+
+def test_a_slow_cleanup_with_requests_in_flight_is_a_warning_not_a_failure(build_dir, monkeypatch):
+    """RT-M-31 failed any cleanup over 10 s although the spec sets no bound (the mock takes 1.2 s, the hint threshold is lowered to 0.5 s)."""
+    from oaax_conformance.checks import runtime_model
+
+    monkeypatch.setattr(runtime_model, "SLOW_CLEANUP_MS", 500)
+    result = _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"]
+    assert result.outcome == "warn" and "SUCCESS but took 1." in result.message
+    assert _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"].outcome == "warn"  # the same on a second run: no hidden state
+    monkeypatch.setattr(runtime_model, "SLOW_CLEANUP_MS", 10000)
+    assert _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"].outcome == "pass"
+
+
+def test_one_slow_retrieve_zero_call_on_a_loaded_host_is_not_a_failure(build_dir, monkeypatch):
+    """RT-M-13 judged ONE sample; it now takes the fastest of 5, so a single delayed call passes and a runtime that is always slow still fails."""
+    assert _run(build_dir, "retrieve0_hiccup", ["RT-M-13"], monkeypatch)["RT-M-13"].outcome == "pass"
+    slow = _run(build_dir, "retrieve0_blocks", ["RT-M-13"], monkeypatch)["RT-M-13"]
+    assert slow.outcome == "fail" and "in each of 5 calls" in slow.message
+
+
+def test_the_timeout_steps_report_the_fastest_and_the_slowest_sample(build_dir, monkeypatch):
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "retrieve0_hiccup")
+    run = _scenario(build_dir, "timeouts", ["-i", "x:FLOAT:1,4", "-i", "scale:FLOAT:1"], timeout=20)
+    assert run.step("retrieve_0")["ms"] < 100 < run.step("retrieve_0")["max_ms"]  # one call took 300 ms, the fastest did not
+    assert run.step("retrieve_200")["max_ms"] >= 190
+
+
+def test_an_init_slower_than_the_budget_blocks_the_checks_that_need_it(build_dir, monkeypatch):
+    """RT-L-07 and RT-M-02 run init many times: a runtime that takes minutes to start is BLOCKED (raise --timeout), never FAILED."""
+    results = _run(build_dir, "hang_init", ["RT-L-07", "RT-M-02"], monkeypatch, timeout=5)
+    assert {i: r.outcome for i, r in results.items()} == {"RT-L-07": "blocked", "RT-M-02": "blocked"}
