@@ -10,7 +10,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from . import html_report, report
+from . import __version__, html_report, report
 from .harness import find_harness
 from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
@@ -57,6 +57,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog="oaax-conformance", description="OAAX conformance suite")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     rt = sub.add_parser("runtime", help="check a runtime library (.so)")
     rt.add_argument("library")

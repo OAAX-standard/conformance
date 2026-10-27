@@ -3,7 +3,7 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: early, Linux only.** The runtime tiers (static, lifecycle, model) and the toolchain / end-to-end tiers run; every test is specified in
+> **Status: 0.1.0, Linux only.** The runtime tiers (static, lifecycle, model) and the toolchain / end-to-end tiers run; every test is specified in
 > [docs/tests/](docs/tests/) (level, quoted spec clause, what the C++ CPU runtime and toolchain do today).
 
 ## Principles
@@ -34,13 +34,50 @@ Every test carries the spec clause it comes from and a level:
 - **SHOULD**: recommended by the text. A failure is a warning.
 - **PROPOSED**: behaviour planned for the next version. Always a warning, so the suite can lead the specification.
 
-## Usage (Linux)
+## Install (Linux)
+
+You need `git`, [uv](https://docs.astral.sh/uv/), Docker (toolchain tier only) and, for the runtime tier, `cmake` and a C compiler (`sudo apt install build-essential cmake`).
 
 ```bash
-scripts/build.sh                       # builds the C harness and the mock runtimes into ./build (needs cmake, a C compiler)
-uv sync                                # from a checkout (creates .venv); the wheel does not ship the harness yet
+git clone https://github.com/OAAX-standard/conformance && cd conformance
+scripts/build.sh                       # builds the C harness of the runtime tier (and the mock runtimes of the self-tests) into ./build
+uv sync                                # creates .venv; uv run oaax-conformance --version
+```
+
+The wheel of a release (`uv tool install oaax_conformance-X.Y.Z-py3-none-any.whl`) is enough for the **toolchain** tier. It does not contain the C harness, so the **runtime** tier
+needs a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere).
+
+## Usage
+
+```bash
 uv run oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--input NAME:DTYPE:DIMS]... [--hardware-safe] [--out DIR]
 ```
+
+Without `--model` the tests that send requests are `BLOCKED` and the run is `INCOMPLETE` (exit 2).
+
+### Try it on the reference CPU runtime
+
+```bash
+mkdir -p /tmp/rt && curl -sSL https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz | tar xz -C /tmp/rt
+uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax_conformance/models/tiny-conv.onnx --out /tmp/report-rt     # ~20 s
+```
+
+The CPU runtime loads any `.onnx` file, here the small model shipped with the suite. For a real device pass a model in the format that runtime loads (the output of its toolchain).
+This runtime has known findings (issues
+[#45](https://github.com/OAAX-standard/reference-implementation/issues/45) to [#49](https://github.com/OAAX-standard/reference-implementation/issues/49)),
+so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-20`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost),
+`RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` WARN, `RT-M-17` BLOCKED (the tiny model answers faster than the suite can time). `RT-M-35` (memory growth over init/load/cleanup cycles, #47) is an RSS measurement:
+it shows with some models (a 1 MB face detector grows 12 MB) and not with others, so a PASS there is weaker than a FAIL. Open `report.html` in `--out` to see what each check did.
+
+### Reading the results
+
+| Status | Meaning |
+| ------ | ------- |
+| `PASS` | the behaviour is as the spec clause says |
+| `FAIL` | a MUST is broken: the message names the clause and what to fix. Exit code 1 |
+| `WARN` | a SHOULD or PROPOSED check differs: worth fixing, never fails the run |
+| `BLOCKED` | the check could not run (no model, slow device, missing vendor key): the message says what to pass. A blocked MUST makes the run `INCOMPLETE` (exit 2) |
+| `N/A` | the check does not apply (for example no second input to leave out) |
 
 Useful options (all in `--help`): `--model FILE` is a model the runtime can load and enables the tests that send requests. To build them the suite needs
 to know what the model takes: it reads an `oaax-manifest.json` next to the model or the `.onnx` file itself, and `--input NAME:DTYPE:DIMS` (use `?` for
@@ -66,13 +103,23 @@ injected faults: `uv run pytest`.
 ### Toolchains
 
 ```bash
+curl -sSL -o /tmp/oaax-cpu-toolchain.tar https://nbg1.your-objectstorage.com/oaax/conversion-toolchain/2.0.0/CPU/oaax-cpu-toolchain.tar && docker load -i /tmp/oaax-cpu-toolchain.tar   # ~800 MB
+uv run oaax-conformance toolchain oaax-cpu-toolchain:2.0.0 --runtime /tmp/rt/libRuntimeLibrary.so --out /tmp/report-tc     # ~30 s
+```
+
+The reference CPU toolchain also has known findings ([#49](https://github.com/OAAX-standard/reference-implementation/issues/49)): expect exit code 1 with `TC-30` FAIL (an empty `.onnx` is accepted), `TC-35` FAIL
+(no log after a failed conversion), `TC-04`/`TC-05` WARN (it writes `model-simplified.onnx` into its input directory) and `TC-23` WARN (no manifest: planned for 2.1).
+
+General form:
+
+```bash
 uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
 ```
 
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
 image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
 with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
-(`pip install oaax-conformance[e2e]`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
+(`uv sync` has it; with the wheel install the `e2e` extra: `uv tool install "oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]"`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 
