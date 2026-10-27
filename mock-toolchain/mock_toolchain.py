@@ -5,6 +5,7 @@ names a fault: every toolchain check must fail on its fault and pass on the clea
 runtime loads), logs.json and oaax-manifest.json. Usage: mock_toolchain.py <input.onnx> <output-directory>"""
 import json
 import os
+import shutil
 import socket
 import sys
 import time
@@ -108,6 +109,9 @@ def main(argv: list[str]) -> int:
         print("usage: mock_toolchain.py <input> <output-directory>")
         return 2
     path, out = argv[0], argv[-1]
+    if fault("echo_token"):  # prints the TOKEN variable so that the last 3000 characters begin in the middle of it (padding after it)
+        # 4000 + 14 + 2984 + newline + the 10 characters of "converted\n" printed at the end = 7009: the last 3000 start 5 characters before the end of a 14-character TOKEN
+        print("A" * 4000 + os.environ.get("TOKEN", "") + "B" * 2984, flush=True)
     if fault("fail_always"):
         return fail(out, "failing on purpose")
     if fault("hang"):
@@ -143,6 +147,11 @@ def main(argv: list[str]) -> int:
         return fail(out, problem)
     if fault("not_idempotent") and os.path.isdir(out) and os.listdir(out):
         return fail(out, "the output directory is not empty")
+    if fault("wipe_second") and os.path.isdir(out) and os.listdir(out):  # a "clean the output directory first" toolchain that then names its file differently
+        shutil.rmtree(out)
+        model_name_override = "other.bin"
+    else:
+        model_name_override = None
     if fault("no_mkdir") and not os.path.isdir(out):
         return fail(out, "the output directory does not exist")
     try:
@@ -151,10 +160,13 @@ def main(argv: list[str]) -> int:
         return 0 if fault("unwritable_ok") else fail(out, f"cannot create the output directory: {e}")
     if fault("writes_input_dir"):
         open(path + ".cache", "w").close()
-    model_name = "model.hef" if fault("vendor_format") else "model.bin"  # a vendor format, and (see below) no manifest to describe it
+    model_name = model_name_override or ("model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("two_models"):  # a second file the runtime also loads, sorting before model.bin
+        with open(os.path.join(out, "a-copy.bin"), "wb") as f:
+            f.write(b"MOCKMODEL" + data)
     if fault("second_file"):  # vendor metadata next to the model (2.0 toolchains have no manifest to say which file is the model)
         with open(os.path.join(out, "a-labels.json"), "w") as f:
             f.write('{"labels": ["face"]}')
@@ -171,8 +183,16 @@ def main(argv: list[str]) -> int:
         if fault("raw_heads"):  # the runtime returns something else than the ONNX outputs: declared honestly
             doc["equivalent"] = False
             doc["outputs"] = [{"name": "head0", "native": {"dtype": "FLOAT", "shape": [1, 8], "layout": "XX"}}]
-        with open(os.path.join(out, "oaax-manifest.json"), "w") as f:
-            json.dump(tamper(doc), f)
+        target = os.path.join(out, "oaax-manifest.json")
+        if fault("fifo_manifest"):  # a named pipe where the manifest should be: whoever opens it blocks forever
+            os.mkfifo(target)
+        elif fault("link_manifest"):  # a link to something endless
+            os.symlink("/dev/zero", target)
+        else:
+            with open(target, "w") as f:
+                json.dump(tamper(doc), f)
+                if fault("huge_manifest"):  # sparse: no disk is used
+                    f.truncate(40 << 20)
     if fault("no_perm"):
         for name in os.listdir(out):
             os.chmod(os.path.join(out, name), 0o600)

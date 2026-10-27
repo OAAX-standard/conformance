@@ -18,7 +18,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .harness import TailCapture, uninterruptible
+from .harness import TailCapture, hide_secrets, uninterruptible
 from .registry import Blocked
 
 DOCKER_ERROR = 125  # `docker run` exit code for its own failures (not the container's)
@@ -86,6 +86,31 @@ class Workspace:
             d.mkdir()
             d.chmod(0o777)  # any uid the container runs as may write here
         return cls(root, in_dir, out_dir)
+
+    @classmethod
+    def with_output_of(cls, other: "Workspace") -> "Workspace":
+        """A new workspace whose output directory starts as a copy of `other`'s: a conversion into an existing output directory is tested on the
+        copy, so a toolchain that cleans or renames what it finds there cannot change the files the end-to-end tests load later.
+        Only directories, regular files and links are copied (never open a FIFO)."""
+        ws = cls.create()
+
+        def copy(src: Path, dst: Path) -> None:
+            for entry in os.scandir(src):
+                target = dst / entry.name
+                if entry.is_symlink():
+                    os.symlink(os.readlink(entry.path), target)
+                elif entry.is_dir(follow_symlinks=False):
+                    target.mkdir()
+                    copy(Path(entry.path), target)
+                elif entry.is_file(follow_symlinks=False):
+                    if entry.stat(follow_symlinks=False).st_size > KEEP_BYTES:  # a compiled model is GB: the toolchain sees a file of that name and size, no disk is used
+                        with open(target, "wb") as f:
+                            f.truncate(entry.stat(follow_symlinks=False).st_size)
+                    else:
+                        shutil.copy2(entry.path, target)
+
+        copy(other.out_dir, ws.out_dir)
+        return ws
 
     def stage(self, filename: str, content: bytes) -> Path:
         path = self.in_dir / filename
@@ -208,10 +233,16 @@ class ToolchainContext:
     timeouts: dict = field(default_factory=dict)  # conversion name -> why it blocks: it did not finish in time
     live: set = field(default_factory=set)  # names of the containers started and not yet finished
     _inspect: dict | None = None
-    _dump: str | None = None
+    _dumps: list = field(default_factory=list)  # one dump directory per runtime context (every E2E candidate gets its own): all removed at close()
+    _picked: tuple | None = None  # (runtime Context, model path, why it was chosen): E2E-01..04 all judge this one file
     progress: bool = False  # print each conversion to stderr as it starts
     model_file: str | None = None  # --model-file: which output file is the model
     candidates: list = field(default_factory=list)  # the output files that were tried as the model (E2E)
+
+    def _secrets(self) -> list[str]:
+        from .report import secret_values
+
+        return secret_values(self.init_config, self.docker_args)
 
     def runtime_context(self, model_path: str):
         """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""
@@ -221,8 +252,9 @@ class ToolchainContext:
             return None
         key = f"runtime:{model_path}"
         if key not in self._runs:
-            self._dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
-            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=self._dump, warmup_ms=self.warmup_ms)
+            dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
+            self._dumps.append(dump)
+            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=dump, warmup_ms=self.warmup_ms)
         return self._runs[key]
 
     def model_bytes(self) -> bytes:
@@ -301,11 +333,12 @@ class ToolchainContext:
             changes = [line[2:] for line in diff.splitlines() if line[:2] in ("A ", "C ")]
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
-        run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
-                         _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+        secrets = self._secrets()  # scrubbed here, before any check cuts the text (to 200 characters, to its last 3000): a cut must never leave half of a secret
+        run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(hide_secrets(out.decode(errors="replace"), secrets), ws),
+                         _redact(hide_secrets(err.decode(errors="replace"), secrets), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
         # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
         _drop_big_files(ws.in_dir)
-        if name != "valid" and workspace is None:
+        if name != BASELINE:  # also the TC-08 copy: a multi-GB model must never exist three times
             _drop_big_files(ws.out_dir)
         if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
             self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"
@@ -372,8 +405,8 @@ class ToolchainContext:
             except OSError:
                 self.leftovers.append(str(ws.root))
         self.workspaces.clear()
-        if self._dump:
-            shutil.rmtree(self._dump, ignore_errors=True)
+        for dump in self._dumps:
+            shutil.rmtree(dump, ignore_errors=True)
 
     def _make_removable(self, ws: Workspace) -> None:
         cmd = ["docker", "run", "--rm", "--user", "0", "--network", "none", "-v", f"{ws.root}:/w", "--entrypoint", "chmod", self.image, "-R", "a+rwX", "/w"]

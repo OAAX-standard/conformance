@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .safefile import read_json
+
 DTYPES = {"FLOAT", "UINT8", "INT8", "UINT16", "INT16", "INT32", "INT64", "BOOL", "FLOAT16", "DOUBLE", "UINT32", "UINT64", "BFLOAT16"}
 
 
@@ -70,12 +72,12 @@ def parse_arg(text: str) -> Tensor:
 
 def _from_manifest(path: Path, model: Path) -> ModelIO | None:
     try:
-        doc = json.loads(path.read_text())
+        doc = read_json(path)  # OSError (a pipe, a link, too big) is the caller's to report; a bad document just is not this model's
         if doc.get("model_file") != model.name:
             return None
         view = lambda t: Tensor(t["name"], t["native"]["dtype"], tuple(None if d < 1 else d for d in t["native"]["shape"]))  # noqa: E731
         return ModelIO(tuple(view(t) for t in doc["inputs"]), tuple(view(t) for t in doc["outputs"]))
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return None
 
 
@@ -116,10 +118,16 @@ def _discover(model: str, manual_inputs: list[str]) -> ModelIO:
     if manual_inputs:
         return ModelIO(tuple(parse_arg(a) for a in manual_inputs), ())
     path = Path(model)
+    unusable = []
     for manifest in sorted(path.parent.glob("oaax-manifest.json")):
-        io = _from_manifest(manifest, path)
+        try:
+            io = _from_manifest(manifest, path)
+        except OSError as e:  # a pipe, a link or an absurdly big file where the manifest should be: never read it, say so
+            unusable.append(str(e))
+            continue
         if io:
             return _buildable(io)
     if path.suffix == ".onnx":
         return _buildable(_from_onnx(path))
-    raise NoModelIO("cannot tell what the model takes: put its oaax-manifest.json next to it, or pass --input NAME:DTYPE:DIMS for every input")
+    why = f" (the manifest next to it cannot be used: {'; '.join(unusable)})" if unusable else ""
+    raise NoModelIO("cannot tell what the model takes: put its oaax-manifest.json next to it, or pass --input NAME:DTYPE:DIMS for every input" + why)

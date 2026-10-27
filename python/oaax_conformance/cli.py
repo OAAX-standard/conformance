@@ -12,7 +12,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import __version__, html_report, report
+from .dockerargs import unparseable, uses
 from .harness import find_harness
+from .libcheck import library_problem
 from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
 from .suite import Context, run_suite
@@ -118,7 +120,7 @@ def _validate(args) -> str | None:
         return "--timeout must be at least 5 seconds"
     if args.command == "runtime":
         if not Path(args.library).is_file():
-            return f"{args.library}: no such library"
+            return f"{args.library}: " + ("is a directory, not a library" if Path(args.library).is_dir() else "no such library")
         if args.model and not Path(args.model).is_file():
             return f"--model {args.model}: no such file"
         if args.workdir and not Path(args.workdir).is_dir():
@@ -132,15 +134,19 @@ def _validate(args) -> str | None:
             return f"--onnx {args.onnx}: no such file"
         if args.runtime and not Path(args.runtime).is_file():
             return f"--runtime {args.runtime}: no such library"
+        if args.runtime and (why := library_problem(args.runtime)):
+            return f"--runtime {args.runtime} {why}"
         if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
             return f"--model-file {args.model_file}: must be a path inside the output directory"
         if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
             return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
-        for arg in args.docker_arg:
-            if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
-                return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
-            if arg.split("=", 1)[0] in FORBIDDEN_DOCKER_ARGS:
-                return f"--docker-arg {arg}: the suite sets this itself (a value here would change what the tests test)"
+        # One reader (dockerargs) for this and for the masking of secrets: every spelling docker accepts (-u0, -tu, -v/x:/y, --user=0, --user 0).
+        if unclear := unparseable(args.docker_arg):
+            return f"--docker-arg {unclear}: cannot tell which docker options this cluster of short flags is; spell each one separately (-e NAME=VALUE, -i, -t)"
+        if env_file := uses(args.docker_arg, ("--env-file",)):  # its values cannot be known, so they could not be kept out of the reports
+            return f"--docker-arg {env_file}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
+        if forced := uses(args.docker_arg, FORBIDDEN_DOCKER_ARGS):
+            return f"--docker-arg {forced}: the suite sets this itself (a value here would change what the tests test)"
     return None
 
 
@@ -172,13 +178,16 @@ NOT_A_LIBRARY = ("file too short", "invalid ELF header", "not a dynamic executab
 def _not_a_library(ctx) -> str | None:
     run = ctx.run("static")  # RT-S-01's own scenario: it only loads the library and looks up the nine exports
     text = run.dlopen_error() if run.end == "dlopen" else ""
-    if any(pattern in text for pattern in NOT_A_LIBRARY):
+    # dlerror names ANOTHER file when a dependency is missing; when it starts with the library's own name, the file itself is the problem
+    if any(pattern in text for pattern in NOT_A_LIBRARY) or text.startswith(f"{ctx.lib}:"):
         return f"{ctx.lib} is not a loadable runtime library ({text.replace(f"{ctx.lib}: ", "")}): pass the libRuntimeLibrary.so built for this machine"
     return None
 
 
 def _runtime(args) -> int:
     lib = str(Path(args.library).resolve())
+    if why := library_problem(lib):  # read from the ELF header: one line instead of 60 BLOCKED rows and a wrong hint
+        return usage_error(f"{args.library} {why}")
     model = str(Path(args.model).resolve()) if args.model else None
     try:
         ctx = Context(lib, find_harness(args.harness), args.init_config, model, args.ignore_thread, args.timeout or 300, manual_inputs=args.input,

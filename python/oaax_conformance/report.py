@@ -11,6 +11,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from . import __version__
+from .dockerargs import env_options
 
 
 @dataclass
@@ -82,7 +83,7 @@ DISCLAIMER = "This run covers only the approved tests; it is not a full conforma
 
 # Everything XML 1.0 cannot hold (C0, U+FFFE/FFFF, lone surrogates) plus what can hijack a terminal or reorder text (C1 incl. CSI, bidi overrides).
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff\ufffe\uffff]")
-_SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/tmp\w{6,}")  # the scenario's own working directory (no --workdir) and our workspaces
+_SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/(?:tmp\w{6,}|oaax-conformance-(?:dump-)?\w{6,})")  # the scenario's own working directory (no --workdir) and our workspaces
 MAX_TEXT = 20000  # a runtime can return megabytes of error text
 
 
@@ -115,29 +116,10 @@ def scrub_results(results: list[Result], private_paths: list[str], secrets: list
     return [replace(r, message=clean_text(r.message, private_paths, secrets), note=clean_text(r.note, private_paths, secrets), title=clean_text(r.title)) for r in results]
 
 
-def _env_args(args: list[str]) -> list[tuple[int, str, str]]:
-    """(index, prefix, "NAME[=VALUE]") of every environment argument docker will see, in each spelling it accepts:
-    `-e V`, `-eV`, `-e=V`, `--env V`, `--env=V`. One parser for masking and for the secrets, so they cannot disagree."""
-    found, i = [], 0
-    while i < len(args):
-        arg = args[i]
-        if arg in ("-e", "--env"):
-            i += 1
-            if i < len(args):
-                found.append((i, "", args[i]))
-        elif arg.startswith("--env="):
-            found.append((i, "--env=", arg[len("--env="):]))
-        elif arg.startswith("-e") and not arg.startswith("--") and len(arg) > 2:
-            head = "-e=" if arg[2] == "=" else "-e"
-            found.append((i, head, arg[len(head):]))
-        i += 1
-    return found
-
-
 def mask_docker_args(args: list[str]) -> list[str]:
     """Environment values are the likeliest secrets in docker arguments: show the variable, not the value. Other flags (--label, --add-host...) are shown as given."""
     out = list(args)
-    for i, head, pair in _env_args(args):
+    for i, head, pair in env_options(args):
         name, sep, _ = pair.partition("=")
         if sep:
             out[i] = head + name + sep + "***"
@@ -148,7 +130,7 @@ def secret_values(init_config: list[str], docker_args: list[str]) -> list[str]:
     """Every value that must never appear in a report: --init-config values and the environment values docker passes to the container,
     including `-e NAME` with no value (docker takes it from this process's environment)."""
     values = [pair.split("=", 1)[1] for pair in init_config if "=" in pair]
-    for _, _, pair in _env_args(docker_args):
+    for _, _, pair in env_options(docker_args):
         name, sep, value = pair.partition("=")
         values.append(value if sep else os.environ.get(name, ""))
     return [v for v in values if len(v) >= 3]  # a one-character "secret" would shred every message
@@ -233,12 +215,16 @@ def write_junit(path: str, doc: dict) -> None:
     # a MUST that could not run or was skipped is INCOMPLETE (exit code 2): an <error>, so that a CI tool reading only this file does not show green
     incomplete = lambda r: r.outcome in ("blocked", "skipped") and r.level == "MUST"  # noqa: E731
     count = lambda pred: str(sum(1 for r in results if pred(r)))  # noqa: E731
+    # JUnit has four states; ours has seven. failures = fail, errors = error + an INCOMPLETE MUST, skipped = blocked/skipped SHOULD+ and n/a (the reason is the message),
+    # passed = pass + warn: the warn count is a property and every warn carries its text, so nothing is hidden and the properties reconcile with the console and the JSON.
     suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)), failures=count(lambda r: r.outcome == "fail"),
                        errors=count(lambda r: r.outcome == "error" or incomplete(r)),
-                       skipped=count(lambda r: r.outcome in ("blocked", "skipped") and not incomplete(r)))
+                       skipped=count(lambda r: r.outcome in ("blocked", "skipped", "na") and not incomplete(r)))
+    props = ET.SubElement(suite, "properties")
+    for outcome in COLORS:
+        ET.SubElement(props, "property", name=f"outcome_{outcome}", value=count(lambda r, o=outcome: r.outcome == o))
     selected = doc.get("summary", {})
     if selected.get("checks_selected") is not None:  # a limited selection must not look like a full run to a CI that reads only this file
-        props = ET.SubElement(suite, "properties")
         ET.SubElement(props, "property", name="checks_selected", value=f"{selected['checks_selected']} of {selected['checks_approved']}")
     for r in results:
         case = ET.SubElement(suite, "testcase", classname=r.level, name=f"{r.id} {r.title}")
@@ -248,6 +234,8 @@ def write_junit(path: str, doc: dict) -> None:
             ET.SubElement(case, "error", type=r.outcome.upper() if r.outcome == "error" else "INCOMPLETE", message=r.message).text = f"spec: {r.source}"
         elif r.outcome in ("blocked", "skipped"):
             ET.SubElement(case, "skipped", message=r.message)
+        elif r.outcome == "na":
+            ET.SubElement(case, "skipped", message=f"not applicable: {r.message}")
         elif r.outcome == "warn":
             ET.SubElement(case, "system-out").text = f"WARNING [{r.level}] {r.message}"
         if r.note:

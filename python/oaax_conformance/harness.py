@@ -19,6 +19,14 @@ STATUS_NAMES = ["SUCCESS", "ERROR", "NOT_INITIALIZED", "ALREADY_INITIALIZED", "M
                 "FILE_NOT_FOUND", "OUT_OF_MEMORY", "INVALID_TENSOR", "TENSOR_SHAPE_MISMATCH", "TENSOR_TYPE_MISMATCH", "NO_OUTPUT_AVAILABLE",
                 "INFERENCE_ERROR", "NOT_IMPLEMENTED", "TIMEOUT", "DEVICE_ERROR", "UNKNOWN_ERROR", "INVALID_MODEL_ID"]
 TAIL = 2000  # bytes of the runtime's own stdout / stderr kept for the report
+CAPTURE = 20000  # bytes captured: secrets are removed from these first and the tail is cut afterwards, so a cut can never leave half of one
+
+
+def hide_secrets(text: str, secrets) -> str:
+    """Replace every secret value by ***, longest first. Call it BEFORE cutting a text to its tail or head."""
+    for secret in sorted({s for s in secrets if s and len(s) >= 3}, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    return text
 GRACE_SECONDS = 5  # SIGTERM first: let the runtime release the device before it is killed
 
 
@@ -64,6 +72,7 @@ class Run:
     timeout: int = 0  # seconds the scenario was allowed
     stdout_tail: str = ""  # what the runtime itself printed
     stderr_tail: str = ""
+    lib: str = ""  # the library under test: a dlopen error that starts with its own name is about that file, not about a missing dependency
 
     @property
     def signal_name(self) -> str | None:
@@ -132,7 +141,8 @@ class Run:
         end = self.end
         if end == "dlopen":
             text = self.dlopen_error()
-            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text else ""  # advice only for a missing dependency
+            own = bool(self.lib) and text.startswith(f"{self.lib}:")  # "<the library>: cannot open shared object file: Permission denied": not a dependency
+            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text and not own else ""  # advice only for a missing dependency
             return f"the library does not load: {text or '?'}{hint}"
         if end == "symbols":
             return "exports are missing (RT-S-01)"
@@ -293,7 +303,7 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
         for pair in config:
             cmd += ["-c", pair]
         timed_out, started = False, time.monotonic()
-        stdout, stderr = TailCapture(), TailCapture()  # bounded: see TailCapture
+        stdout, stderr = TailCapture(CAPTURE), TailCapture(CAPTURE)  # bounded: see TailCapture
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout.write_fd, stderr=stderr.write_fd, start_new_session=True)
         except BaseException:
@@ -319,8 +329,9 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 lines.append(json.loads(line))
             except ValueError:
                 pass  # a half-written last line of a killed process
-        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout,
-                   stdout.value().decode("utf-8", errors="replace"), stderr.value().decode("utf-8", errors="replace"))
+        secrets = [pair.split("=", 1)[1] for pair in config if "=" in pair]
+        tail = lambda capture: hide_secrets(capture.value().decode("utf-8", errors="replace"), secrets)[-TAIL:]  # noqa: E731 - scrub first, cut afterwards
+        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr), lib)
     finally:
         scratch.cleanup()
         if own_dir:

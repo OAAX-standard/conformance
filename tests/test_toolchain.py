@@ -1,5 +1,6 @@
 """The toolchain tier tests itself: the clean mock toolchain passes everything, every check fails on its own fault.
 Needs Docker (the mock toolchain is an image); skipped without it."""
+import shutil
 import subprocess
 import time
 
@@ -106,7 +107,7 @@ def test_the_suite_removes_its_temporary_directories(build_dir, mock_io_onnx, to
 
     ctx = _context(build_dir, mock_io_onnx, CLEAN, "zip_slip", tmp_path)
     run_suite(ctx, ["TC-39", "E2E-02"], prefixes=("TC-", "E2E-"))
-    roots = [ws.root for ws in ctx.workspaces] + ([Path(ctx._dump)] if ctx._dump else [])
+    roots = [ws.root for ws in ctx.workspaces] + [Path(d) for d in ctx._dumps]
     assert roots
     ctx.close()
     assert not [r for r in roots if r.exists()] and ctx.leftovers == []
@@ -276,7 +277,7 @@ def test_vendor_metadata_next_to_the_model_does_not_block_the_end_to_end_tests(b
 
 def test_no_output_file_loads_is_a_failure_that_names_the_candidates_and_the_way_out(build_dir, mock_io_onnx, toolchain_images, tmp_path):
     results = _run(_context(build_dir, mock_io_onnx, CLEAN, "corrupt_model,second_file,no_manifest", tmp_path), ["E2E-01", "E2E-02"])
-    assert results["E2E-01"].outcome == "fail" and "a-labels.json, model.bin" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
+    assert results["E2E-01"].outcome == "fail" and "model.bin, a-labels.json" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
     assert results["E2E-02"].outcome == "blocked"
 
 
@@ -336,3 +337,155 @@ def test_a_toolchain_that_hangs_on_a_valid_model_costs_one_timeout_not_one_per_c
     assert time.monotonic() - started < 12  # one 4 s timeout, not six
     assert {r.outcome for r in results.values()} == {"blocked"}
     assert "the other conversions are not tried" in results["TC-02"].message and "--timeout" in results["TC-30"].message
+
+
+# ---- round 6 --------------------------------------------------------------------------------------------------------------------------
+
+def test_a_toolchain_that_cleans_its_output_directory_does_not_break_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C1: TC-08 converted a second time into the baseline's own output directory; a toolchain that wipes and renames what it finds there made
+    E2E-01 FAIL (MUST) on a model that had loaded fine. TC-08 now works on a copy."""
+    ids = ["TC-01", "TC-08", "E2E-01", "E2E-02", "E2E-03", "E2E-04"]
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "wipe_second", tmp_path), ids)
+    assert {i: (r.outcome, r.message) for i, r in results.items() if r.outcome != "pass"} == {}
+
+
+def test_the_copy_of_an_output_directory_keeps_files_and_links_and_never_opens_a_fifo(tmp_path):
+    import os
+
+    from oaax_conformance.toolchain import Workspace
+
+    first = Workspace.create()
+    try:
+        (first.out_dir / "result").mkdir()
+        (first.out_dir / "result" / "model.bin").write_bytes(b"MODEL")
+        os.symlink("model.bin", first.out_dir / "result" / "link")
+        os.mkfifo(first.out_dir / "result" / "pipe")  # copying this by opening it would block forever
+        copy = Workspace.with_output_of(first)
+        try:
+            assert (copy.out_dir / "result" / "model.bin").read_bytes() == b"MODEL"
+            assert os.readlink(copy.out_dir / "result" / "link") == "model.bin"
+            assert not (copy.out_dir / "result" / "pipe").exists()
+        finally:
+            shutil.rmtree(copy.root)
+    finally:
+        shutil.rmtree(first.root)
+
+
+@pytest.mark.parametrize("fault", ["fifo_manifest", "link_manifest", "huge_manifest"])
+def test_a_manifest_that_is_not_a_small_regular_file_never_hangs_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path, fault):
+    """C8: a named pipe called oaax-manifest.json hung the whole suite in E2E (modelio read it for every scenario)."""
+    import signal
+
+    def alarm(*_):
+        raise TimeoutError("the suite hung")
+
+    old = signal.signal(signal.SIGALRM, alarm)
+    signal.alarm(150)
+    try:
+        results = _run(_context(build_dir, mock_io_onnx, CLEAN, fault, tmp_path), ["TC-01", "E2E-01", "E2E-02"])
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert results["TC-01"].outcome == "pass"
+    assert results["E2E-01"].outcome in ("pass", "blocked") and results["E2E-02"].outcome == "blocked"
+    assert "manifest" in results["E2E-02"].message
+
+
+def test_the_end_to_end_tests_prefer_model_dot_star_and_say_which_file_they_judged(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C3: with two loadable output files and no manifest E2E silently tested the alphabetically first one and no report named it."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "two_models,no_manifest", tmp_path), ["E2E-01"])
+    r = results["E2E-01"]
+    assert r.outcome == "pass", r.message
+    assert r.note.startswith("the end-to-end tests judge the output file model.bin (the first of 2 output files that the runtime loads (model.bin, a-copy.bin)")
+    assert "--model-file" in r.note
+
+
+def test_a_manifest_names_the_model_and_the_note_says_so(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path), ["E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    for test_id, r in results.items():
+        assert r.outcome == "pass", (test_id, r.message)
+        assert r.note == "the end-to-end tests judge the output file model.bin (named by the manifest)", (test_id, r.note)  # the same file in all four
+
+
+def test_an_explicit_model_file_is_the_one_judged_and_the_note_says_so(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    from oaax_conformance.toolchain import ToolchainContext
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path)
+    ctx.model_file = "a-copy.bin"
+    results = _run(ctx, ["E2E-01"])
+    assert results["E2E-01"].outcome == "pass" and "a-copy.bin (chosen with --model-file)" in results["E2E-01"].note
+
+
+def test_every_dump_directory_of_every_candidate_is_removed_at_close(build_dir, mock_io_onnx, tmp_path):
+    """C6: only the last candidate's dump directory was removed; the others stayed in /tmp."""
+    import os
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    for name in ("a.bin", "b.bin", "c.bin"):
+        ctx.runtime_context(str(tmp_path / name))
+    dumps = list(ctx._dumps)
+    assert len(dumps) == 3 and all(os.path.isdir(d) for d in dumps)
+    ctx.close()
+    assert not [d for d in dumps if os.path.exists(d)]
+
+
+def test_a_secret_cut_by_the_tail_never_shows_half_of_it(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C7: the last 3000 characters of the console were cut BEFORE the secrets were removed, so a secret straddling the cut left its tail in report.json."""
+    token = "s3cretvalue123"
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "echo_token", tmp_path)
+    ctx.docker_args += ["-e", f"TOKEN={token}"]
+    _run(ctx, ["TC-01"])
+    obs = ctx._runs["valid"].observations()[0]  # the command line is masked later, in the report; what the toolchain printed must already be clean
+    shown = obs.get("stdout_tail", "") + obs.get("stderr_tail", "")
+    assert shown.count("B") > 2000 and token not in shown and len(shown) <= 3000
+    assert all(token[-n:] not in shown for n in range(3, len(token) + 1)), shown[:60]  # not even its last 3 characters
+
+
+def test_a_runtime_secret_cut_by_the_tail_never_shows_half_of_it(tmp_path):
+    import os
+    import stat
+
+    from oaax_conformance.harness import TAIL, run_scenario
+
+    token = "s3cretvalue123"
+    script = tmp_path / "fake-harness"
+    script.write_text(f"#!/usr/bin/env python3\nprint('A' * 5000 + '{token}' + 'B' * {TAIL - 5})\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    run = run_scenario(str(script), "static", "libx.so", [f"key={token}"], timeout=10)
+    assert token not in run.stdout_tail and all(token[-n:] not in run.stdout_tail for n in range(3, len(token) + 1)), run.stdout_tail[:60]
+    assert len(run.stdout_tail) <= TAIL
+
+
+def test_the_tc08_copy_never_holds_the_big_model_a_second_time(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C10(4): the workspace of TC-08's second conversion was not pruned like the others, so a multi-GB model existed up to three times."""
+    from oaax_conformance.toolchain import KEEP_BYTES
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "big_output", tmp_path)
+    try:
+        results = {r.id: r for r in run_suite(ctx, ["TC-01", "TC-08"], prefixes=("TC-", "E2E-")).results}
+        assert results["TC-08"].outcome == "pass" and len(ctx.workspaces) >= 2
+        baseline, others = ctx.workspaces[0], ctx.workspaces[1:]
+        assert any(p.stat().st_size > KEEP_BYTES for p in baseline.out_dir.rglob("*") if p.is_file())  # E2E still loads the baseline's model
+        assert [p for ws in others for p in ws.out_dir.rglob("*") if p.is_file() and p.stat().st_size > KEEP_BYTES] == []
+    finally:
+        ctx.close()
+
+
+def test_the_copy_of_an_output_directory_does_not_copy_big_files(tmp_path):
+    from oaax_conformance.toolchain import KEEP_BYTES, Workspace
+
+    first = Workspace.create()
+    try:
+        with open(first.out_dir / "big.bin", "wb") as f:
+            f.write(b"x" * 1000)
+            f.truncate(4 * KEEP_BYTES)  # sparse stand-in for a compiled model
+        (first.out_dir / "small.json").write_text("{}")
+        copy = Workspace.with_output_of(first)
+        try:
+            placeholder = copy.out_dir / "big.bin"
+            assert placeholder.stat().st_size == 4 * KEEP_BYTES and placeholder.stat().st_blocks * 512 < KEEP_BYTES  # same name and size, no disk
+            assert (copy.out_dir / "small.json").read_text() == "{}"
+        finally:
+            shutil.rmtree(copy.root)
+    finally:
+        shutil.rmtree(first.root)

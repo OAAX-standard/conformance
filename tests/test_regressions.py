@@ -729,8 +729,8 @@ def test_a_limited_selection_says_so_everywhere(build_dir, tmp_path, capsys):
     assert re.search(r"Only 2 of \d+ approved checks were selected", capsys.readouterr().out)
     doc = json.loads((out / "report.json").read_text())
     assert doc["summary"]["checks_selected"] == 2 and doc["summary"]["checks_approved"] > 50
-    prop = ET.parse(out / "junit.xml").getroot().find("properties/property")
-    assert prop.get("name") == "checks_selected" and prop.get("value").startswith("2 of ")
+    props = {p.get("name"): p.get("value") for p in ET.parse(out / "junit.xml").getroot().iter("property")}
+    assert props["checks_selected"].startswith("2 of ")
 
 
 def test_a_full_run_does_not_claim_to_be_partial(build_dir, tmp_path, capsys):
@@ -779,8 +779,8 @@ def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
 
 # ---- round 5, A16: a file that is not a runtime library is one line, not 60 BLOCKED rows -----------------------------------------------------------
 
-@pytest.mark.parametrize("kind,cause", [("empty", "file too short"), ("text", "file too short|invalid ELF header"), ("executable", "cannot dynamically load|not a dynamic executable"),
-                                        ("elf32", "wrong ELF class")])
+@pytest.mark.parametrize("kind,cause", [("empty", "is empty"), ("text", "not an ELF file"), ("executable", "cannot dynamically load|not a dynamic executable"),
+                                        ("elf32", "32-bit library")])  # round 6: read from the ELF header up front (libcheck), before dlopen is asked
 def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path, capsys, kind, cause):
     """A16: a 0-byte file, a text file or an executable as the "runtime" gave 60+ BLOCKED rows, exit 2 and a wrong "set LD_LIBRARY_PATH" hint."""
     import shutil
@@ -799,3 +799,174 @@ def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path
     assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
     err = capsys.readouterr().err.strip()
     assert re.search(cause, err) and "LD_LIBRARY_PATH" not in err and len(err.splitlines()) == 1 and "BLOCKED" not in err
+
+
+def test_the_workspace_directories_of_the_suite_are_scrubbed_from_every_message(tmp_path):
+    """C2: the regex matched mkdtemp's default `tmpXXXX` only, so our own `oaax-conformance-XXXX` workspaces leaked into the reports."""
+    import tempfile
+
+    base = tempfile.gettempdir()
+    text = f"cannot read {base}/oaax-conformance-ab12cd34/out/result/model.bin and {base}/oaax-conformance-dump-ab12cd34/x and {base}/tmpab12cd34/y"
+    cleaned = report.clean_text(text, [], [])
+    assert "oaax-conformance-" not in cleaned and cleaned.count("<tmp>") == 3
+
+
+# ---- round 6: one reader for the docker arguments (C4 secrets in clusters, C9 forbidden flags in attached forms) ----------------------------------
+
+@pytest.mark.parametrize("args", [["-te", "K=sekret1"], ["-tek=sekret1"], ["-dte", "K=sekret1"], ["-ite=K=sekret1"], ["-ite", "K=sekret1"]])
+def test_docker_short_option_clusters_cannot_carry_an_unmasked_environment_value(args):
+    """C4: `-te K=v` (docker accepts it) returned unchanged from the masking and registered no secret."""
+    assert report.secret_values([], args) == ["sekret1"]
+    assert "sekret1" not in " ".join(report.mask_docker_args(args)) and "K=***".lower() in " ".join(report.mask_docker_args(args)).lower()
+
+
+@pytest.mark.parametrize("args", [["-u0"], ["-uroot"], ["-u", "0"], ["-tu", "0"], ["-itu0"], ["-u=0"], ["--user=0"], ["--user", "0"],
+                                  ["-v/host:/x"], ["-v", "/host:/x"], ["-tv", "/host:/x"], ["--volume=/host:/x"], ["--mount", "type=bind,src=/h,dst=/x"],
+                                  ["--net=host"], ["--network", "host"], ["--entrypoint=sh"], ["--read-only"], ["--privileged"], ["--rm"], ["--name=x"]])
+def test_every_spelling_of_a_flag_the_suite_sets_itself_is_refused(args, capsys):
+    """C9: only `--user` and `-u` as whole words were refused; `-u0` ran the toolchain as root after the suite's own --user, so TC-02 passed falsely."""
+    assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
+    assert "the suite sets this itself" in capsys.readouterr().err
+
+
+def test_a_cluster_that_cannot_be_read_with_certainty_is_refused(capsys):
+    assert cli.main(["toolchain", "x", "--docker-arg=-xe", "--docker-arg=K=v"]) == 3
+    assert "cannot tell which docker options" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["-it"], ["-e", "K=v", "--gpus=all"], ["-te", "K=v"], ["--cap-add=SYS_ADMIN"], ["-l", "a=b"], ["-l", "-u"]])  # the last: "-u" is the VALUE of -l, not an option
+def test_ordinary_docker_arguments_are_not_refused(args):
+    from oaax_conformance.dockerargs import unparseable, uses
+
+    assert unparseable(args) is None and uses(args, cli.FORBIDDEN_DOCKER_ARGS) is None
+
+
+# ---- round 6 (C5): a file that is not a library this machine can load is ONE line, read from its ELF header ----------------------------------
+
+def _crafted(build_dir, tmp_path, how):
+    import platform
+
+    path = tmp_path / "libcrafted.so"
+    data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+    host_is_arm = platform.machine().lower() in ("aarch64", "arm64")
+    if how == "other_machine":
+        data[18:20] = (62 if host_is_arm else 183).to_bytes(2, "little")  # x86_64 on an ARM host, aarch64 on an x86_64 host
+    elif how == "elf32":
+        data[4] = 1
+    elif how == "truncated":
+        data = data[:100]
+    elif how == "empty":
+        data = b""
+    elif how == "text":
+        data = b"this is not a library\n" * 20
+    path.write_bytes(bytes(data))
+    return path
+
+
+@pytest.mark.parametrize("how,expect", [("other_machine", "is built for"), ("elf32", "32-bit"), ("truncated", "truncated"), ("empty", "is empty"), ("text", "not an ELF")])
+def test_a_library_that_cannot_load_here_is_one_line_with_exit_3(build_dir, tmp_path, capsys, how, expect):
+    """C5: an aarch64 library on x86_64 gave 60 BLOCKED rows, exit 2 and the advice to set LD_LIBRARY_PATH; a truncated one even passed RT-S-02."""
+    path = _crafted(build_dir, tmp_path, how)
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    err = capsys.readouterr().err
+    assert expect in err and "LD_LIBRARY_PATH" not in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
+
+
+def test_a_directory_and_an_unreadable_library_are_one_line_too(build_dir, tmp_path, capsys):
+    import os
+
+    assert cli.main(["runtime", str(tmp_path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    assert "is a directory" in capsys.readouterr().err  # said by the pre-validation (is_file), before any header is read
+    if os.geteuid() != 0:  # root reads everything
+        path = tmp_path / "libnoperm.so"
+        path.write_bytes((build_dir / "libmock_runtime.so").read_bytes())
+        path.chmod(0)
+        assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+        err = capsys.readouterr().err
+        assert "permission denied" in err and "LD_LIBRARY_PATH" not in err
+
+
+def test_the_same_check_guards_the_runtime_given_to_the_toolchain_tests(build_dir, tmp_path, capsys):
+    path = _crafted(build_dir, tmp_path, "text")
+    assert cli.main(["toolchain", "x", "--runtime", str(path)]) == 3
+    assert "not an ELF" in capsys.readouterr().err
+
+
+def test_the_library_path_advice_is_for_a_missing_dependency_only():
+    own = Run("static", 1, False, [{"step": "dlopen", "status": 1, "str": "/x/libr.so: cannot open shared object file: Permission denied".encode().hex()}], lib="/x/libr.so")
+    own.lines[0]["status"] = 1
+    other = Run("static", 1, False, [{"step": "dlopen", "status": 1, "str": "libfoo.so.1: cannot open shared object file: No such file or directory".encode().hex()}], lib="/x/libr.so")
+    for run in (own, other):
+        run.lines[0].setdefault("end", "dlopen")
+    assert "LD_LIBRARY_PATH" not in own._why_missing("x") and "LD_LIBRARY_PATH" in other._why_missing("x")
+
+
+def test_rt_s_02_is_blocked_not_passed_when_nm_cannot_read_the_library(tmp_path):
+    import types
+
+    from oaax_conformance.checks.runtime_static import only_the_nine_exports
+    from oaax_conformance.registry import Blocked
+
+    broken = tmp_path / "libbroken.so"
+    broken.write_bytes(b"\x7fELF" + b"\0" * 60)  # has the magic, nm cannot read it: its empty listing used to count as "no extra symbols"
+    with pytest.raises(Blocked, match="nm could not read"):
+        only_the_nine_exports(types.SimpleNamespace(lib=str(broken)))
+
+
+# ---- round 6 (C10): the three report formats tell the same story ----------------------------------------------------------------------------
+
+def _results_of_every_kind():
+    R = report.Result
+    return [R("A1", "t", "MUST", "s", "pass"), R("A2", "t", "MUST", "s", "pass"), R("A3", "t", "SHOULD", "s", "pass"),
+            R("B1", "t", "SHOULD", "s", "warn", "slow"), R("B2", "t", "MUST", "s", "warn", "slow cleanup"),
+            R("C1", "t", "MUST", "s", "fail", "bad"), R("D1", "t", "MUST", "s", "blocked", "no model"), R("D2", "t", "SHOULD", "s", "blocked", "no model"),
+            R("E1", "t", "SHOULD", "s", "skipped", "--skip"), R("F1", "t", "SHOULD", "s", "na", "one input"), R("F2", "t", "PROPOSED", "s", "na", "one input"),
+            R("G1", "t", "MUST", "s", "error", "a bug")]
+
+
+def _document_of(results, selected=None, approved=62):
+    import types
+
+    suite = types.SimpleNamespace(results=results, not_approved=0, runs={}, leftovers=[], selected=selected if selected is not None else approved, approved=approved)
+    return report._document(suite, "2.0", {"kind": "toolchain", "name": "img", "sha256": "0" * 8, "detail": "d"}, {"docker_args": [], "runtime": None}, [], [])
+
+
+def test_console_json_and_junit_counts_reconcile(tmp_path):
+    """C10(1): JUnit counted warn and n/a as passed (console 42 pass, 5 warn, 3 n/a against JUnit failures=4 errors=1 skipped=7): nothing was reconcilable."""
+    results = _results_of_every_kind()
+    doc = _document_of(results)
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), doc)
+    suite = ET.parse(path).getroot()
+    shown = {}
+    summary_line = next(l for l in report.console(results, 0).splitlines() if "draft tests not run" in l)
+    for part in summary_line.split("  (")[0].split(", "):  # "3 pass, 2 warn, ..."
+        n, name = part.split(" ", 1)
+        shown["na" if name == "n/a" else name] = int(n)
+    props = {p.get("name"): p.get("value") for p in suite.iter("property")}
+    in_junit = {o: int(props[f"outcome_{o}"]) for o in report.COLORS if int(props[f"outcome_{o}"])}
+    assert shown == in_junit == {o: n for o, n in doc["summary"]["counts"].items() if n}
+    failures, errors, skipped, tests = (int(suite.get(k)) for k in ("failures", "errors", "skipped", "tests"))
+    assert tests == len(results) == sum(shown.values())
+    assert failures == shown["fail"] and errors == shown["error"] + 1  # + the blocked MUST (INCOMPLETE)
+    assert skipped == (shown["blocked"] - 1) + shown["skipped"] + shown["na"]  # the blocked SHOULD, the skipped, and every n/a
+    assert tests - failures - errors - skipped == shown["pass"] + shown["warn"]  # what JUnit calls passed is pass + warn, and the warns are listed
+    cases = {c.get("name").split(" ")[0]: c for c in suite.iter("testcase")}
+    assert all("WARNING" in cases[i].find("system-out").text for i in ("B1", "B2"))
+    assert all("not applicable" in cases[i].find("skipped").get("message") for i in ("F1", "F2"))
+
+
+def test_the_html_report_says_when_only_some_checks_were_selected():
+    """C10(2): the console, the JSON and the JUnit said "2 of 62 selected"; the HTML did not."""
+    from oaax_conformance import html_report
+
+    results = _results_of_every_kind()[:2]
+    assert "Only 2 of 62 approved checks were selected" in html_report.render(_document_of(results, selected=2))
+    assert "approved checks were selected" not in html_report.render(_document_of(results, selected=62))
+
+
+def test_the_changelog_counts_the_review_rounds_that_were_run():
+    from pathlib import Path
+
+    text = Path(__file__).resolve().parent.parent.joinpath("CHANGELOG.md").read_text()
+    assert "six adversarial review rounds" in text and "five adversarial" not in text
