@@ -748,3 +748,29 @@ def test_a_tmpdir_docker_cannot_mount_is_refused_naming_the_cause(tmp_path, monk
     monkeypatch.setattr(tempfile, "tempdir", str(bad))
     assert cli.main(["toolchain", "x"]) == 3
     assert "contains ':'" in capsys.readouterr().err
+
+
+# ---- round 5, A14: the documented sandbox is what the code does ---------------------------------------------------------------------------------
+
+def test_every_conversion_runs_with_dropped_capabilities_and_the_docker_arg_comes_last():
+    """A14: only five conversions were restricted; every other one had the default capabilities. --docker-arg stays last so docker lets it override."""
+    from types import SimpleNamespace
+
+    from oaax_conformance.toolchain import ToolchainContext
+
+    ctx = ToolchainContext("img", "m.onnx", ["--cap-add=SYS_NICE", "--pids-limit=9"])
+    ws = SimpleNamespace(in_dir="/w/in", out_dir="/w/out")
+    cmd = ctx._docker(ws, "valid", ["/input/m.onnx", "/output/r"], user=None, network=True, read_only_rootfs=False, ro_input=False, ro_output=False)
+    assert ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096"] == cmd[cmd.index("--cap-drop"):cmd.index("--cap-drop") + 6]
+    assert cmd.index("--cap-drop") < cmd.index("--cap-add=SYS_NICE") < cmd.index("img") and "--network" not in cmd
+
+
+def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
+    """A14: "no network, read-only mounts" was claimed for every run; it holds for the runs that repeat a conversion under that restriction."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for name in ("README.md", "SECURITY.md"):
+        text = (root / name).read_text()
+        assert "(no network, read-only mounts, unprivileged user)" not in text and "without network, with read-only mounts" not in text
+    assert "--cap-drop ALL" in (root / "README.md").read_text() and "TC-03" in (root / "SECURITY.md").read_text()

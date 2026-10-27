@@ -23,7 +23,7 @@ Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker
 | `runtime/static` | the `.so` / `.dll` only | exported symbols, getters, calls before `init` |
 | `runtime/lifecycle` | a working `init` (device, or the CPU runtime) | `init`/`cleanup` rules, error text, cycles, threads, unload, memory, exit |
 | `runtime/model` | a model the runtime can load (+ the device) | enqueue/retrieve, id echo, multi-model routing, timeouts, concurrency, input validation, leaks |
-| `toolchain` | the Docker image | arguments, exit codes, log and manifest, no root / no network, output integrity, hostile input |
+| `toolchain` | the Docker image | arguments, exit codes, log and manifest, runs without root / without network / read-only, output integrity, hostile input |
 | `e2e` | both | convert, load, run, compare with the ONNX reference (`rtol 1e-4`, `atol 1e-5`, a fixed tolerance: no precision is declared yet) |
 
 ## Test levels
@@ -121,7 +121,7 @@ uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.on
 ```
 
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
-image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
+image with all capabilities dropped (`--cap-drop ALL`, `no-new-privileges`, a process limit; `--docker-arg` can override), then repeats the conversion as an arbitrary unprivileged user (TC-02), without network (TC-03), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output (TC-38); network stays on in the other runs, because a toolchain that needs it is a finding, not a block. It also runs on hostile inputs (empty, garbage, truncated, missing, a zip
 with `../` members). With `--runtime LIB` it then loads the converted model in that runtime (a 2.0 toolchain has no manifest naming it: if it writes several files besides its log, the suite tries each and the one the runtime loads is the model; `--model-file NAME`, relative to the output directory, names it explicitly) and compares the results with onnxruntime
 (`uv sync` has it, and it needs the C harness of a checkout; the wheel alone cannot run these tests, see Install). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB). Each conversion works in a temporary directory under `$TMPDIR` (point it at a disk with room); the big files of a conversion are deleted as soon as it is done, except those of the first valid conversion (the end-to-end tests load it), so plan for about two to three times the size of your model. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 

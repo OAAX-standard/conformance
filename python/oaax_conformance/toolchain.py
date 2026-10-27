@@ -95,6 +95,8 @@ class Workspace:
 
 
 KEEP_BYTES = 1 << 20
+# Every conversion, not only the ones that repeat the run under a restriction: a toolchain is an image we did not write.
+HARDENING = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096"]
 BASELINE = "valid"  # the conversion every other result is judged against
 
 
@@ -235,6 +237,7 @@ class ToolchainContext:
                 ro_output: bool) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", f"oaax-conformance-{uuid.uuid4().hex[:12]}"]
         cmd += ["--user", user or f"{os.getuid()}:{os.getgid()}"]
+        cmd += HARDENING  # in front of --docker-arg: a toolchain that really needs a capability gets it with --docker-arg=--cap-add=..., and that is a finding to report
         if not network:
             cmd += ["--network", "none"]
         if read_only_rootfs:
