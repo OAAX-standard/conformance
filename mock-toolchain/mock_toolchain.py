@@ -15,7 +15,7 @@ from oaax_conformance import manifest  # noqa: E402
 
 
 def fault(name: str) -> bool:
-    return os.environ.get("OAAX_MOCK_FAULT") == name
+    return name in os.environ.get("OAAX_MOCK_FAULT", "").split(",")
 
 
 def say(text: str) -> None:
@@ -150,6 +150,9 @@ def main(argv: list[str]) -> int:
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("second_file"):  # vendor metadata next to the model (2.0 toolchains have no manifest to say which file is the model)
+        with open(os.path.join(out, "a-labels.json"), "w") as f:
+            f.write('{"labels": ["face"]}')
     if fault("big_output"):  # a compiled model is big: a sparse 8 MiB file stands for it
         with open(os.path.join(out, "weights.bin"), "wb") as f:
             f.truncate(8 << 20)

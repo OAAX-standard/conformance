@@ -206,6 +206,8 @@ class ToolchainContext:
     _inspect: dict | None = None
     _dump: str | None = None
     progress: bool = False  # print each conversion to stderr as it starts
+    model_file: str | None = None  # --model-file: which output file is the model
+    candidates: list = field(default_factory=list)  # the output files that were tried as the model (E2E)
 
     def runtime_context(self, model_path: str):
         """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""

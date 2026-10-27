@@ -337,11 +337,22 @@ def _converted(ctx):
     if not ctx.runtime_lib:
         raise Blocked("needs --runtime LIB: the runtime that loads what this toolchain produces")
     doc = _manifest_doc(run)
-    names = [doc["model_file"]] if doc and doc.get("model_file") in run.files() else run.model_files()
-    if len(names) != 1:
-        raise Blocked(f"cannot tell which output file is the model ({', '.join(names) or 'none'}); a 2.1 oaax-manifest.json names it")
-    path = str(run.result_dir / names[0])
-    return ctx.runtime_context(path), path
+    if ctx.model_file:
+        if ctx.model_file not in run.files():
+            raise Blocked(f"--model-file {ctx.model_file}: not in the output directory (found: {', '.join(run.files()) or 'nothing'})")
+        names = [ctx.model_file]
+    elif doc and doc.get("model_file") in run.files():
+        names = [doc["model_file"]]
+    else:
+        names = sorted(run.model_files())  # a 2.0 toolchain has no manifest: vendor metadata may sit next to the model, so the runtime tells which file is it
+    if not names:
+        raise Blocked("the conversion left no model file (see TC-20)")
+    ctx.candidates = names
+    for name in names:
+        rctx = ctx.runtime_context(str(run.result_dir / name))
+        if len(names) == 1 or rctx.run("load-twice").end != "model":
+            return rctx, str(run.result_dir / name)
+    return ctx.runtime_context(str(run.result_dir / names[0])), str(run.result_dir / names[0])  # none loads: E2E-01 says so, the others are blocked on it
 
 
 @check("E2E-01")
@@ -349,7 +360,10 @@ def runtime_loads_it(ctx):
     rctx, _ = _converted(ctx)
     run = rctx.run("load-twice")
     if run.end == "model":
-        raise Fail("the runtime could not load the converted model" + run._why_missing("load_first").split("--model", 1)[-1].replace(")", "", 1).rstrip())
+        why = run._why_missing("load_first").split("--model", 1)[-1].replace(")", "", 1).rstrip()
+        if len(ctx.candidates) > 1:
+            raise Fail(f"the runtime could not load any of the output files ({', '.join(ctx.candidates)}); if the model is one of them, name it with --model-file NAME{why}")
+        raise Fail("the runtime could not load the converted model" + why)
     run.step("load_first")
 
 

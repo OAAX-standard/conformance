@@ -261,3 +261,37 @@ def test_disk_use_does_not_grow_with_the_number_of_conversions(build_dir, mock_i
     results = _run(ctx, [i for i in CHECKS if i.startswith("TC-") and i not in ("TC-50", "TC-51", "TC-52")])
     assert len(peaks) >= 12 and {r.outcome for r in results.values()} <= {"pass", "warn", "na", "blocked"}
     assert max(peaks) < 4 * (8 << 20), f"peak {max(peaks) >> 20} MiB over {len(peaks)} conversions"
+
+
+# ---- round 5, A12: a toolchain that writes more than the model --------------------------------------------------------------------------
+
+def test_vendor_metadata_next_to_the_model_does_not_block_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A12: a 2.0 toolchain has no manifest, and a second non-empty file (labels, calibration cache) made E2E-01 BLOCKED with no way out: the suite now
+    tries each candidate and the one the runtime loads is the model (the labels file sorts first and the runtime refuses it)."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path), ["E2E-01"])
+    assert results["E2E-01"].outcome == "pass"
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "second_file", tmp_path), ["E2E-01", "E2E-02", "E2E-04"])  # with a manifest, as before
+    assert {i: r.outcome for i, r in results.items()} == {"E2E-01": "pass", "E2E-02": "pass", "E2E-04": "pass"}
+
+
+def test_no_output_file_loads_is_a_failure_that_names_the_candidates_and_the_way_out(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "corrupt_model,second_file,no_manifest", tmp_path), ["E2E-01", "E2E-02"])
+    assert results["E2E-01"].outcome == "fail" and "a-labels.json, model.bin" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
+    assert results["E2E-02"].outcome == "blocked"
+
+
+def test_model_file_names_the_model_explicitly(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path)
+    ctx.model_file = "model.bin"
+    assert _run(ctx, ["E2E-01"])["E2E-01"].outcome == "pass" and ctx.candidates == ["model.bin"]
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path)
+    ctx.model_file = "nope.bin"
+    blocked = _run(ctx, ["E2E-01"])["E2E-01"]
+    assert blocked.outcome == "blocked" and "--model-file nope.bin" in blocked.message and "model.bin" in blocked.message
+
+
+@pytest.mark.parametrize("name", ["../x", "/etc/passwd"])
+def test_model_file_must_stay_inside_the_output_directory(build_dir, name):
+    from oaax_conformance import cli
+
+    assert cli.main(["toolchain", "x", "--model-file", name]) == 3

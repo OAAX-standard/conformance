@@ -115,12 +115,12 @@ The reference CPU toolchain also has known findings ([#49](https://github.com/OA
 General form:
 
 ```bash
-uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
+uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value [--model-file NAME]] [--docker-arg ARG]... [--out DIR]
 ```
 
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
 image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
-with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
+with `../` members). With `--runtime LIB` it then loads the converted model in that runtime (a 2.0 toolchain has no manifest naming it: if it writes several files besides its log, the suite tries each and the one the runtime loads is the model; `--model-file NAME`, relative to the output directory, names it explicitly) and compares the results with onnxruntime
 (`uv sync` has it, and it needs the C harness of a checkout; the wheel alone cannot run these tests, see Install). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB). Each conversion works in a temporary directory under `$TMPDIR` (point it at a disk with room); the big files of a conversion are deleted as soon as it is done, except those of the first valid conversion (the end-to-end tests load it), so plan for about two to three times the size of your model. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).

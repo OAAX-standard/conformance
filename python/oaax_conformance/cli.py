@@ -76,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("image", help="the toolchain image, e.g. oaax-cpu-toolchain:2.0.0")
     _add_common(tc)
     tc.add_argument("--onnx", metavar="FILE", help="a valid ONNX model this toolchain can convert (default: a small convolution model shipped with the suite)")
+    tc.add_argument("--model-file", metavar="NAME", help="which file of the output directory is the model, if the toolchain writes several (default: the suite tries each "
+                    "and uses the one the runtime loads); relative to the output directory")
     tc.add_argument("--runtime", metavar="LIB", help="the runtime that loads what the toolchain produces: enables the E2E tests")
     tc.add_argument("--docker-arg", action="append", default=[], metavar="ARG", help="an argument added to every `docker run` (repeatable), e.g. --docker-arg=--gpus=all; "
                     "the suite sets --user, --network, --read-only and the mounts itself")
@@ -129,6 +131,8 @@ def _validate(args) -> str | None:
             return f"--onnx {args.onnx}: no such file"
         if args.runtime and not Path(args.runtime).is_file():
             return f"--runtime {args.runtime}: no such library"
+        if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
+            return f"--model-file {args.model_file}: must be a path inside the output directory"
         for arg in args.docker_arg:
             if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
                 return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
@@ -195,6 +199,7 @@ def _toolchain(args) -> int:
     runtime = str(Path(args.runtime).resolve()) if args.runtime else None
     ctx = ToolchainContext(args.image, onnx, args.docker_arg, args.timeout or 900, runtime, harness, args.init_config)
     ctx.progress = not args.quiet
+    ctx.model_file = args.model_file
     skip = {i: "skipped by request (--skip)" for i in args.skip}
     try:
         suite = run_suite(ctx, args.only, prefixes=("TC-", "E2E-"), skip=skip)
