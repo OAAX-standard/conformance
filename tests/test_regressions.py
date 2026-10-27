@@ -249,7 +249,8 @@ def test_a_library_that_is_not_elf_does_not_pass_the_export_check(tmp_path, buil
     ctx.lib = str(fake)
     results = helpers.run(ctx, ["RT-S-02", "RT-S-01"])
     assert results["RT-S-02"].outcome == "blocked" and "ELF" in results["RT-S-02"].message
-    assert results["RT-S-01"].outcome == "blocked" and "LD_LIBRARY_PATH" in results["RT-S-01"].message
+    assert results["RT-S-01"].outcome == "blocked" and "does not load" in results["RT-S-01"].message
+    assert "LD_LIBRARY_PATH" not in results["RT-S-01"].message  # round 5, A16: that advice is for a missing dependency, not for a file that is no library
 
 
 # ---- A16: what the runtime itself says ------------------------------------------------------------------------------------
