@@ -72,6 +72,7 @@ class Run:
     timeout: int = 0  # seconds the scenario was allowed
     stdout_tail: str = ""  # what the runtime itself printed
     stderr_tail: str = ""
+    lib: str = ""  # the library under test: a dlopen error that starts with its own name is about that file, not about a missing dependency
 
     @property
     def signal_name(self) -> str | None:
@@ -140,7 +141,8 @@ class Run:
         end = self.end
         if end == "dlopen":
             text = self.dlopen_error()
-            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text else ""  # advice only for a missing dependency
+            own = bool(self.lib) and text.startswith(f"{self.lib}:")  # "<the library>: cannot open shared object file: Permission denied": not a dependency
+            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text and not own else ""  # advice only for a missing dependency
             return f"the library does not load: {text or '?'}{hint}"
         if end == "symbols":
             return "exports are missing (RT-S-01)"
@@ -329,7 +331,7 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 pass  # a half-written last line of a killed process
         secrets = [pair.split("=", 1)[1] for pair in config if "=" in pair]
         tail = lambda capture: hide_secrets(capture.value().decode("utf-8", errors="replace"), secrets)[-TAIL:]  # noqa: E731 - scrub first, cut afterwards
-        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr))
+        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr), lib)
     finally:
         scratch.cleanup()
         if own_dir:

@@ -33,12 +33,17 @@ def only_the_nine_exports(ctx):
     with open(ctx.lib, "rb") as f:
         if f.read(4) != b"\x7fELF":
             raise Blocked("the library is not an ELF file: its exports cannot be listed here")
-    listing = subprocess.run([nm, "-D", "--defined-only", ctx.lib], capture_output=True, text=True).stdout
+    nm_run = subprocess.run([nm, "-D", "--defined-only", ctx.lib], capture_output=True, text=True)
+    if nm_run.returncode != 0:  # an empty listing is not "no extra symbols": a library nm cannot read has not been judged
+        raise Blocked(f"nm could not read the library ({(nm_run.stderr.strip().splitlines() or ['no message'])[-1][:150]}): its exports cannot be listed")
+    listing = nm_run.stdout
     # "A" = absolute: the version node of a linker version script (e.g. OAAX_V2), not an exported function
     exported = {parts[-1].split("@")[0] for parts in map(str.split, listing.splitlines()) if len(parts) == 3 and parts[1] != "A"}
     extra = sorted(exported - {"runtime_" + s for s in SYMBOLS} - LINKER_SYMBOLS)
-    dyn = subprocess.run([readelf, "--dyn-syms", "-W", ctx.lib], capture_output=True, text=True).stdout
-    unique = sum(" UNIQUE " in line for line in dyn.splitlines())
+    readelf_run = subprocess.run([readelf, "--dyn-syms", "-W", ctx.lib], capture_output=True, text=True)
+    if readelf_run.returncode != 0:
+        raise Blocked(f"readelf could not read the library ({(readelf_run.stderr.strip().splitlines() or ['no message'])[-1][:150]}): its symbols cannot be listed")
+    unique = sum(" UNIQUE " in line for line in readelf_run.stdout.splitlines())
     problems = []
     if extra:
         problems.append(f"{len(extra)} extra exported symbol(s), e.g. {', '.join(extra[:5])}")

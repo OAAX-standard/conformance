@@ -839,3 +839,75 @@ def test_ordinary_docker_arguments_are_not_refused(args):
     from oaax_conformance.dockerargs import unparseable, uses
 
     assert unparseable(args) is None and uses(args, cli.FORBIDDEN_DOCKER_ARGS) is None
+
+
+# ---- round 6 (C5): a file that is not a library this machine can load is ONE line, read from its ELF header ----------------------------------
+
+def _crafted(build_dir, tmp_path, how):
+    import platform
+
+    path = tmp_path / "libcrafted.so"
+    data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+    host_is_arm = platform.machine().lower() in ("aarch64", "arm64")
+    if how == "other_machine":
+        data[18:20] = (62 if host_is_arm else 183).to_bytes(2, "little")  # x86_64 on an ARM host, aarch64 on an x86_64 host
+    elif how == "elf32":
+        data[4] = 1
+    elif how == "truncated":
+        data = data[:100]
+    elif how == "empty":
+        data = b""
+    elif how == "text":
+        data = b"this is not a library\n" * 20
+    path.write_bytes(bytes(data))
+    return path
+
+
+@pytest.mark.parametrize("how,expect", [("other_machine", "is built for"), ("elf32", "32-bit"), ("truncated", "truncated"), ("empty", "is empty"), ("text", "not an ELF")])
+def test_a_library_that_cannot_load_here_is_one_line_with_exit_3(build_dir, tmp_path, capsys, how, expect):
+    """C5: an aarch64 library on x86_64 gave 60 BLOCKED rows, exit 2 and the advice to set LD_LIBRARY_PATH; a truncated one even passed RT-S-02."""
+    path = _crafted(build_dir, tmp_path, how)
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    err = capsys.readouterr().err
+    assert expect in err and "LD_LIBRARY_PATH" not in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
+
+
+def test_a_directory_and_an_unreadable_library_are_one_line_too(build_dir, tmp_path, capsys):
+    import os
+
+    assert cli.main(["runtime", str(tmp_path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    assert "is a directory" in capsys.readouterr().err  # said by the pre-validation (is_file), before any header is read
+    if os.geteuid() != 0:  # root reads everything
+        path = tmp_path / "libnoperm.so"
+        path.write_bytes((build_dir / "libmock_runtime.so").read_bytes())
+        path.chmod(0)
+        assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+        err = capsys.readouterr().err
+        assert "permission denied" in err and "LD_LIBRARY_PATH" not in err
+
+
+def test_the_same_check_guards_the_runtime_given_to_the_toolchain_tests(build_dir, tmp_path, capsys):
+    path = _crafted(build_dir, tmp_path, "text")
+    assert cli.main(["toolchain", "x", "--runtime", str(path)]) == 3
+    assert "not an ELF" in capsys.readouterr().err
+
+
+def test_the_library_path_advice_is_for_a_missing_dependency_only():
+    own = Run("static", 1, False, [{"step": "dlopen", "status": 1, "str": "/x/libr.so: cannot open shared object file: Permission denied".encode().hex()}], lib="/x/libr.so")
+    own.lines[0]["status"] = 1
+    other = Run("static", 1, False, [{"step": "dlopen", "status": 1, "str": "libfoo.so.1: cannot open shared object file: No such file or directory".encode().hex()}], lib="/x/libr.so")
+    for run in (own, other):
+        run.lines[0].setdefault("end", "dlopen")
+    assert "LD_LIBRARY_PATH" not in own._why_missing("x") and "LD_LIBRARY_PATH" in other._why_missing("x")
+
+
+def test_rt_s_02_is_blocked_not_passed_when_nm_cannot_read_the_library(tmp_path):
+    import types
+
+    from oaax_conformance.checks.runtime_static import only_the_nine_exports
+    from oaax_conformance.registry import Blocked
+
+    broken = tmp_path / "libbroken.so"
+    broken.write_bytes(b"\x7fELF" + b"\0" * 60)  # has the magic, nm cannot read it: its empty listing used to count as "no extra symbols"
+    with pytest.raises(Blocked, match="nm could not read"):
+        only_the_nine_exports(types.SimpleNamespace(lib=str(broken)))
