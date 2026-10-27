@@ -579,14 +579,29 @@ def test_version_is_printed_and_comes_from_one_place(capsys):
 
 # ---- round 5 ------------------------------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("args", [["-e", "T=s3cretvalue"], ["-eT=s3cretvalue"], ["--env", "T=s3cretvalue"], ["--env=T=s3cretvalue"], ["-e", "T=s3cret=value"]])
+@pytest.mark.parametrize("args", [["-e", "T=s3cretvalue"], ["-eT=s3cretvalue"], ["-e=T=s3cretvalue"], ["--env", "T=s3cretvalue"], ["--env=T=s3cretvalue"],
+                                  ["--gpus=all", "-e", "T=s3cretvalue"]])
 def test_every_docker_env_form_registers_its_bare_value_as_a_secret(args):
-    """A1: `--env=NAME=VALUE` registered "NAME=VALUE" as the secret, so the value alone leaked into every report."""
+    """A1/A3: `--env=NAME=VALUE` and `-e=NAME=VALUE` registered "NAME=VALUE" as the secret, so the value alone leaked into every report."""
     secrets = report.secret_values([], args)
-    value = args[-1].split("=", 2)[-1] if args[-1].startswith("--env=") else args[-1].split("=", 1)[1]
-    assert secrets == [value]
-    text = report.clean_text(f"failed: token={value} name={args[-1].split('=')[0]}", [], secrets)
-    assert value not in text and "token=***" in text
+    assert secrets == ["s3cretvalue"]
+    shown = " ".join(report.mask_docker_args(args))
+    assert "s3cretvalue" not in shown and "T=***" in shown
+    assert "s3cretvalue" not in report.clean_text("failed: token=s3cretvalue", [], secrets)
+
+
+def test_a_value_containing_equals_signs_is_kept_whole():
+    assert report.secret_values([], ["-e", "T=a=b=c"]) == ["a=b=c"]
+
+
+@pytest.mark.parametrize("args", [["-e", "T"], ["--env", "T"], ["--env=T"], ["-eT"], ["-e=T"]])
+def test_a_variable_docker_takes_from_this_environment_is_a_secret_too(args, monkeypatch):
+    """A3: `-e NAME` has no value in the arguments, but docker injects ours into the container and the toolchain may echo it."""
+    monkeypatch.setenv("T", "s3cretvalue")
+    assert report.secret_values([], args) == ["s3cretvalue"]
+    assert report.mask_docker_args(args) == args  # nothing to hide in the arguments themselves
+    monkeypatch.delenv("T")
+    assert report.secret_values([], args) == []  # an unset variable has no value to leak
 
 
 def test_an_env_file_is_refused_because_its_values_cannot_be_kept_out_of_the_reports(capsys):

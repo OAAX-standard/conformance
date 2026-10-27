@@ -92,7 +92,7 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
 - `report.html`: a self-contained page (works offline) with the verdict, the expected behaviour and spec clause of each test, what was observed,
   and every call the harness made. Print it to PDF from the browser: the print layout opens every section.
 - `report.json`: everything in the page, for tools and archiving (library sha256, platform, per-test result with evidence, full call transcripts).
-  Values given to `--init-config` or `docker -e` are never stored, and directories are removed from every message.
+  Values given to `--init-config` or as docker environment variables (`-e`, `--env`, in any spelling, also `-e NAME` taken from your environment) are never stored, and directories are removed from every message. Other docker flags (`--label`, `--add-host`...) are shown as given, so keep secrets out of them; `--env-file` is refused.
 - `junit.xml`: for CI.
 
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for

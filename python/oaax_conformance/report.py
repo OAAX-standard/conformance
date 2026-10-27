@@ -2,6 +2,7 @@
 import hashlib
 import json
 import platform
+import os
 import re
 import tempfile
 from datetime import datetime, timezone
@@ -108,26 +109,42 @@ def scrub_results(results: list[Result], private_paths: list[str], secrets: list
     return [replace(r, message=clean_text(r.message, private_paths, secrets), title=clean_text(r.title)) for r in results]
 
 
+def _env_args(args: list[str]) -> list[tuple[int, str, str]]:
+    """(index, prefix, "NAME[=VALUE]") of every environment argument docker will see, in each spelling it accepts:
+    `-e V`, `-eV`, `-e=V`, `--env V`, `--env=V`. One parser for masking and for the secrets, so they cannot disagree."""
+    found, i = [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-e", "--env"):
+            i += 1
+            if i < len(args):
+                found.append((i, "", args[i]))
+        elif arg.startswith("--env="):
+            found.append((i, "--env=", arg[len("--env="):]))
+        elif arg.startswith("-e") and not arg.startswith("--") and len(arg) > 2:
+            head = "-e=" if arg[2] == "=" else "-e"
+            found.append((i, head, arg[len(head):]))
+        i += 1
+    return found
+
+
 def mask_docker_args(args: list[str]) -> list[str]:
-    """Environment values are the likeliest secrets in docker arguments: show the variable, not the value."""
-    out, after_env = [], False
-    for arg in args:
-        masked = arg
-        if arg.startswith("--env=") or after_env or (arg.startswith("-e") and arg != "-e" and "=" in arg):
-            head = "--env=" if arg.startswith("--env=") else "-e" if arg.startswith("-e") and not after_env else ""
-            name, sep, _ = arg[len(head):].partition("=")
-            masked = head + name + sep + "***" if sep else arg
-        out.append(masked)
-        after_env = arg in ("-e", "--env")
+    """Environment values are the likeliest secrets in docker arguments: show the variable, not the value. Other flags (--label, --add-host...) are shown as given."""
+    out = list(args)
+    for i, head, pair in _env_args(args):
+        name, sep, _ = pair.partition("=")
+        if sep:
+            out[i] = head + name + sep + "***"
     return out
 
 
 def secret_values(init_config: list[str], docker_args: list[str]) -> list[str]:
-    """Every value that must never appear in a report: --init-config values and environment values given to docker."""
+    """Every value that must never appear in a report: --init-config values and the environment values docker passes to the container,
+    including `-e NAME` with no value (docker takes it from this process's environment)."""
     values = [pair.split("=", 1)[1] for pair in init_config if "=" in pair]
-    masked = mask_docker_args(docker_args)
-    # A masked argument is "<prefix>***": the secret is whatever the original has after that prefix, whatever the flag form (-e, -eX=, --env=, --env X=).
-    values += [orig[len(new) - 3:] for orig, new in zip(docker_args, masked) if orig != new and new.endswith("***")]
+    for _, _, pair in _env_args(docker_args):
+        name, sep, value = pair.partition("=")
+        values.append(value if sep else os.environ.get(name, ""))
     return [v for v in values if len(v) >= 3]  # a one-character "secret" would shred every message
 
 
