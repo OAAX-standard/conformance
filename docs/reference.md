@@ -69,6 +69,8 @@ The suite sets some flags itself, so a value from you would change what the test
 
 `--user`/`-u`, `-v`/`--volume`/`--mount`, `--network`/`--net`, `--entrypoint`, `--read-only`, `--privileged`, `--rm`, `--name`.
 
+Flags that change how a foreground `docker run` behaves are refused too (exit 3, one line), because they gave false MUST FAILs: `-d`/`--detach` (docker returns the container id at once and the suite would read `/output` while the toolchain still runs), `-a`/`--attach`, `--restart` (docker: "conflicting options: cannot specify both --restart and --rm"), `--cidfile` (the second of the ~30 conversions fails with "container ID file found"), and `-i`/`--interactive` together with `-t`/`--tty` ("cannot attach stdin to a TTY-enabled container": the suite's stdin is `/dev/null`; either one alone is fine, and `-dit` clusters are read like `-d -i -t`). `--tmpfs`, `--init`, `--stop-signal` and `--sig-proxy` are accepted: docker runs fine with them.
+
 The suite's own defaults on every conversion are `--cap-drop ALL`, `--security-opt no-new-privileges` and a process limit; `--docker-arg` may override those (a toolchain that needs a capability is worth reporting to its vendor).
 
 ## The toolchain tier

@@ -970,3 +970,31 @@ def test_the_changelog_counts_the_review_rounds_that_were_run():
 
     text = Path(__file__).resolve().parent.parent.joinpath("CHANGELOG.md").read_text()
     assert "six adversarial review rounds" in text and "five adversarial" not in text
+
+
+# ---- round 7 (D6): flags that take `docker run` out of the foreground are refused up front ----------------------------------------------------
+
+@pytest.mark.parametrize("args", [["-d"], ["--detach"], ["--detach=true"], ["-dit"], ["-td"], ["-a", "stdout"], ["--attach=stdout"], ["-astdout"], ["--restart=always"], ["--restart", "no"],
+                                  ["--cidfile=/tmp/x"], ["--cidfile", "/tmp/x"], ["-i", "-t"], ["-it"], ["-ti"], ["--interactive", "--tty"], ["-i", "--tty"], ["-dit"], ["-itu0"]])
+def test_a_flag_that_changes_the_foreground_run_is_refused(args, capsys):
+    """D6: `-d` gave TC-20/TC-33 false FAILs (docker returns the container id at once), `-i -t` a false TC-01 FAIL (docker exit 1 blamed on the toolchain)."""
+    assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
+    err = capsys.readouterr().err
+    assert "--docker-arg" in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
+
+
+@pytest.mark.parametrize("args", [["-i"], ["-t"], ["--interactive"], ["--tty"], ["--tty=false", "-i"], ["--detach=false"], ["--init"], ["--tmpfs", "/tmp"], ["--stop-signal=SIGKILL"],
+                                  ["--sig-proxy=false"], ["-e", "K=v", "--gpus=all"], ["-l", "-d"]])  # the last: "-d" is the VALUE of -l
+def test_flags_docker_runs_fine_with_in_the_foreground_are_not_refused(args):
+    from oaax_conformance.dockerargs import foreground_problem, uses
+
+    assert foreground_problem(args) is None and uses(args, cli.FORBIDDEN_DOCKER_ARGS) is None
+
+
+def test_the_docs_list_what_is_refused():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    reference = (root / "docs" / "reference.md").read_text()  # the README links to it: the list of refused flags lives there only
+    for flag in ("`-d`/`--detach`", "`--restart`", "`--cidfile`", "`-i`/`--interactive`"):
+        assert flag in reference, flag

@@ -69,6 +69,26 @@ def unparseable(args: list[str]) -> str | None:
     return next((args[o.index] for o in options(args) if o.flag.startswith("-?")), None)
 
 
+BOOLEAN_LONG = frozenset(("--detach", "--interactive", "--tty"))
+
+
 def uses(args: list[str], flags: tuple[str, ...]) -> str | None:
-    """The first argument that sets one of `flags` (`-u`, `--user`...) in any spelling, or None."""
-    return next((args[o.index] for o in options(args) if o.flag in flags), None)
+    """The first argument that sets one of `flags` (`-u`, `--user`...) in any spelling, or None. `--tty=false` and its like do not set anything."""
+    return next((args[o.index] for o in options(args) if o.flag in flags and not (o.flag in BOOLEAN_LONG and o.value == "false")), None)
+
+
+# `docker run` must stay in the foreground, with the container's exit code and a /output that nobody still writes to (the suite snapshots it when the container is gone).
+FOREGROUND_BREAKERS = ("-d", "--detach", "-a", "--attach", "--restart", "--cidfile")
+
+
+def foreground_problem(args: list[str]) -> str | None:
+    """Why these arguments would make a conversion run in the background, conflict with `--rm`, fail on the second conversion, or not attach stdin; None if they are fine.
+    Checked on a docker 2x: -d returns the container id at once; --restart is "conflicting options: cannot specify both --restart and --rm" (exit 125); the second run
+    with the same --cidfile is "container ID file found" (exit 125); -i with -t is "cannot attach stdin to a TTY-enabled container" (exit 1). Either of -i and -t alone is fine."""
+    if bad := uses(args, FOREGROUND_BREAKERS):
+        return f"{bad}: the suite needs `docker run` in the foreground (it reads /output when the container exits, runs about thirty conversions and gives each its own --rm container); " \
+               "-d/--detach, -a/--attach, --restart and --cidfile are refused"
+    interactive, tty = uses(args, ("-i", "--interactive")), uses(args, ("-t", "--tty"))
+    if interactive and tty:
+        return f"{interactive} together with {tty}: docker cannot attach stdin to a terminal when the suite's stdin is /dev/null; use either one, not both"
+    return None
