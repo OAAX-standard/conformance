@@ -1,5 +1,6 @@
 """One regression test per finding of the adversary reviews (A1.. = round 1), each driven by a fault of the mock runtime or toolchain."""
 import json
+import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -672,3 +673,78 @@ def test_the_readme_gives_the_python_the_wheel_needs():
 
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
     assert "uv tool install --python 3.12 oaax_conformance" in readme and "[e2e]" not in readme
+
+
+# ---- round 5, A11: a PASS that rests on less than the specified work says so -----------------------------------------------------------------
+
+def test_a_slow_init_is_not_a_pass_with_an_empty_message_after_a_few_cycles(build_dir, monkeypatch):
+    """A11: with a slow init RT-L-07 (50 cycles), RT-L-10 and RT-M-35 passed after 3 cycles, silently; a leak of 1 MB per cycle passes 3 cycles."""
+    results = _run(build_dir, "slow_init", ["RT-L-07", "RT-L-10", "RT-M-35"], monkeypatch, timeout=20)
+    assert results["RT-L-07"].outcome == "pass" and re.search(r"only \d+ of 50 init/cleanup cycles ran \(the time budget ran out: raise --timeout\)", results["RT-L-07"].note)
+    for check in ("RT-L-10", "RT-M-35"):
+        assert results[check].outcome == "blocked" and "at least 10" in results[check].message and "--timeout" in results[check].message
+
+
+def test_hardware_safe_cycles_are_blocked_for_growth_and_noted_for_repeatability(build_dir):
+    ctx = helpers.context(build_dir)
+    ctx.hardware_safe()
+    results = helpers.run(ctx, ["RT-L-07", "RT-L-10"])
+    assert results["RT-L-07"].outcome == "pass" and results["RT-L-07"].note == "only 3 of 50 init/cleanup cycles ran (--hardware-safe runs few cycles by design)"
+    assert results["RT-L-10"].outcome == "blocked" and "--hardware-safe" in results["RT-L-10"].message
+
+
+def test_a_note_is_printed_on_the_console_and_kept_in_junit(tmp_path):
+    from dataclasses import asdict
+
+    r = report.Result("A", "t", "MUST", "s", "pass", note="only 3 of 50 cycles ran")
+    text = report.console([r], 0)
+    assert "Details" in text and "A [MUST] PASS" in text and "note: only 3 of 50 cycles ran" in text
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), {"spec_version": "2.0", "results": [asdict(r)]})
+    assert "NOTE [MUST] only 3 of 50 cycles ran" in path.read_text()
+
+
+# ---- round 5, A9 ------------------------------------------------------------------------------------------------------------------------------
+
+def _cli_run(build_dir, tmp_path, *extra):
+    out = tmp_path / "out"
+    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--quiet", "--pause", "0",
+            "--out", str(out), *extra]
+    return cli.main(argv), out
+
+
+def test_a_secret_that_is_a_common_word_does_not_rewrite_the_specification_text(build_dir, tmp_path):
+    """A9c: scrub() ran over the whole document, so --init-config device=load turned "two models loaded in one call" into "two models ***ed" in the permanent record."""
+    code, out = _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--init-config", "device=load", "--only", "RT-M-02")
+    assert code == 0
+    result = json.loads((out / "report.json").read_text())["results"][0]
+    assert "load_models" in result["pass_when"] and "***" not in result["pass_when"] + result["source"] + result["title"]
+
+
+def test_a_limited_selection_says_so_everywhere(build_dir, tmp_path, capsys):
+    """A9d: `--only X --only Y` printed "Result: no MUST check failed" and recorded nothing about the 60 checks that did not run."""
+    code, out = _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--only", "RT-M-33", "--only", "RT-M-08")
+    assert code == 0
+    assert re.search(r"Only 2 of \d+ approved checks were selected", capsys.readouterr().out)
+    doc = json.loads((out / "report.json").read_text())
+    assert doc["summary"]["checks_selected"] == 2 and doc["summary"]["checks_approved"] > 50
+    prop = ET.parse(out / "junit.xml").getroot().find("properties/property")
+    assert prop.get("name") == "checks_selected" and prop.get("value").startswith("2 of ")
+
+
+def test_a_full_run_does_not_claim_to_be_partial(build_dir, tmp_path, capsys):
+    _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--only", "RT-S-01")
+    assert "approved checks were selected" in capsys.readouterr().out
+    results = helpers.run(helpers.context(build_dir))
+    assert "approved checks were selected" not in report.console(list(results.values()), 0, selected=(len(results), len(results)))
+
+
+def test_a_tmpdir_docker_cannot_mount_is_refused_naming_the_cause(tmp_path, monkeypatch, capsys):
+    """A9e: with ':' in TMPDIR every `docker run -v` failed and the message blamed the Docker setup and --docker-arg."""
+    import tempfile
+
+    bad = tmp_path / "a:b"
+    bad.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(bad))
+    assert cli.main(["toolchain", "x"]) == 3
+    assert "contains ':'" in capsys.readouterr().err

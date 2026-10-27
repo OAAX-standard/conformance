@@ -3,6 +3,9 @@ import json
 
 from ..harness import status_name
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
+from .runtime_lifecycle import MIN_CYCLES_FOR_GROWTH, _why_fewer
+
+SPEC_MODEL_CYCLES = 20  # what RT-M-35 is titled with
 
 SUCCESS, NO_OUTPUT_AVAILABLE = 0, 12
 TENSOR_SHAPE_MISMATCH, TENSOR_TYPE_MISMATCH, INVALID_MODEL_ID = 10, 11, 18
@@ -424,10 +427,15 @@ def cycles_with_a_model(ctx):
     if obs["threads_after"] > obs["threads_before"]:
         problems.append(f"{obs['threads_after'] - obs['threads_before']} thread(s) left after {obs['cycles']} cycles")
     growth = obs["rss_last"] - obs["rss_first"]
-    if obs["rss_first"] >= 0 and growth > MAX_CYCLE_RSS_GROWTH:
+    if obs["rss_first"] >= 0 and obs["completed"] >= MIN_CYCLES_FOR_GROWTH and growth > MAX_CYCLE_RSS_GROWTH:
         problems.append(f"RSS grew {growth / 1048576:.1f} MB over {obs['cycles']} init/load/cleanup cycles (limit {MAX_CYCLE_RSS_GROWTH // 1048576} MB)")
     if problems:
         raise Fail("; ".join(problems))
+    if obs["completed"] < MIN_CYCLES_FOR_GROWTH:
+        raise Blocked(f"only {obs['completed']} of {SPEC_MODEL_CYCLES} init/load/cleanup cycles ran ({_why_fewer(ctx)}): no failure and no thread left, but too few cycles "
+                      f"to tell memory growth from noise (at least {MIN_CYCLES_FOR_GROWTH} are needed)")
+    if obs["completed"] < SPEC_MODEL_CYCLES:
+        ctx.notes.append(f"only {obs['completed']} of {SPEC_MODEL_CYCLES} init/load/cleanup cycles ran ({_why_fewer(ctx)})")
 
 
 @check("RT-M-36")

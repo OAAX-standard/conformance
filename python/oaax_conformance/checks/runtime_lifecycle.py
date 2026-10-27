@@ -71,6 +71,14 @@ def info_after_cleanup(ctx):
         raise Fail("runtime_get_info() is not NULL after cleanup")
 
 
+SPEC_CYCLES = 50  # what RT-L-07 and RT-L-10 are titled with; --hardware-safe and a slow device run fewer
+MIN_CYCLES_FOR_GROWTH = 10  # RSS noise of a few cycles says nothing about a leak: a leak of 1 MB per cycle passes 3 cycles
+
+
+def _why_fewer(ctx) -> str:
+    return "--hardware-safe runs few cycles by design" if getattr(ctx, "safe", False) else "the time budget ran out: raise --timeout"
+
+
 def _cycles(ctx) -> dict:
     """The cycles scenario, or Blocked when the device was too slow for the time budget to fit enough cycles to judge anything."""
     cycles = ctx.run("cycles").step("cycles")
@@ -84,6 +92,8 @@ def reinit_cycles(ctx):
     cycles = _cycles(ctx)
     if cycles["init_failures"] or cycles["cleanup_failures"]:
         raise Fail(cycles["first_failure"])
+    if cycles["completed"] < SPEC_CYCLES:  # repeatability is shown by a few cycles, but the result must not look like the specified 50
+        ctx.notes.append(f"only {cycles['completed']} of {SPEC_CYCLES} init/cleanup cycles ran ({_why_fewer(ctx)})")
 
 
 @check("RT-L-08")
@@ -106,6 +116,9 @@ def no_memory_growth(ctx):
     cycles = _cycles(ctx)
     if cycles["rss_first"] < 0 or cycles["rss_last"] < 0:
         raise Blocked("RSS not readable on this platform")
+    if cycles["completed"] < MIN_CYCLES_FOR_GROWTH:
+        raise Blocked(f"only {cycles['completed']} of {SPEC_CYCLES} init/cleanup cycles ran ({_why_fewer(ctx)}): too few to tell memory growth from noise "
+                      f"(at least {MIN_CYCLES_FOR_GROWTH} are needed)")
     growth = cycles["rss_last"] - cycles["rss_first"]
     if growth > MAX_RSS_GROWTH:
         raise Fail(f"RSS grew {growth / 1048576:.1f} MB over {cycles['completed']} init/cleanup cycles (limit {MAX_RSS_GROWTH // 1048576} MB)")

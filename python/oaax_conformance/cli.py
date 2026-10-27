@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -133,6 +134,8 @@ def _validate(args) -> str | None:
             return f"--runtime {args.runtime}: no such library"
         if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
             return f"--model-file {args.model_file}: must be a path inside the output directory"
+        if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
+            return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
         for arg in args.docker_arg:
             if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
                 return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
@@ -146,7 +149,7 @@ def _print_and_write(suite, args, title: str, document, paths: list[str], secret
         return usage_error("no test ran: the selection matches no approved test (see docs/tests)")
     shown = report.scrub_results(suite.results, paths, secrets)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-    print(report.console(shown, suite.not_approved, color, title))
+    print(report.console(shown, suite.not_approved, color, title, (suite.selected, suite.approved)))
     if suite.leftovers:
         print("\nCould not remove (owned by another user, left alone): " + ", ".join(suite.leftovers))
     if args.out:

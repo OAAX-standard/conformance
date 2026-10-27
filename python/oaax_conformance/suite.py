@@ -31,6 +31,7 @@ class Context:
     producers: int = 4
     per_producer: int = 25
     model_cycles: int = 20
+    safe: bool = False  # --hardware-safe: fewer cycles by design (the notes and hints of the cycle checks say so)
     dump_dir: str | None = None  # the harness writes the outputs of the roundtrip scenario here (E2E tests)
     retrieve_timeout_ms: int = 10000  # how long a round trip waits for its output (scaled up from the first answered request)
     warmup_ms: int = 120000  # how long the very first request of a scenario may take
@@ -45,6 +46,7 @@ class Context:
     def hardware_safe(self) -> None:
         """Gentle on a shared or fragile device: few cycles, small floods, a pause between scenarios."""
         self.cycles, self.model_cycles, self.flood, self.requests = 3, 3, 50, 50
+        self.safe = True
         self.producers, self.per_producer, self.pause = 2, 10, 3.0
 
     def model_io(self) -> ModelIO:
@@ -90,6 +92,7 @@ class Context:
 def run_check(spec: Spec, ctx, skip: dict | None = None) -> Result:
     result = Result(spec.id, spec.title, spec.level, spec.source, "pass", pass_when=spec.pass_when)
     ctx.used = []
+    ctx.notes = []  # a check that passes on less than the specified work says so (Result.note)
     fn = CHECKS.get(spec.id)
     if skip and spec.id in skip:
         result.outcome, result.message = "skipped", skip[spec.id]
@@ -110,6 +113,7 @@ def run_check(spec: Spec, ctx, skip: dict | None = None) -> Result:
     except Exception:  # a bug in the check, not a verdict on the runtime
         result.outcome, result.message = "error", traceback.format_exc(limit=3).strip().splitlines()[-1]
     result.scenarios = list(ctx.used)
+    result.note = "; ".join(ctx.notes)
     return result
 
 
@@ -119,6 +123,8 @@ class SuiteRun:
     not_approved: int
     runs: dict  # scenario / conversion name -> what was observed (anything with observations())
     leftovers: list = field(default_factory=list)  # temporary directories that could not be removed
+    selected: int = 0  # approved checks selected to run (--only), of `approved`
+    approved: int = 0
 
 
 def run_suite(ctx, only: list[str] | None = None, prefixes: tuple = ("RT-",), skip: dict | None = None) -> SuiteRun:
@@ -131,4 +137,4 @@ def run_suite(ctx, only: list[str] | None = None, prefixes: tuple = ("RT-",), sk
     for key, value in ctx._runs.items():
         if isinstance(value, list):  # conversions started together
             runs.update({f"{key}-{i}": run for i, run in enumerate(value)})
-    return SuiteRun(results, len(specs) - len(approved), runs)
+    return SuiteRun(results, len(specs) - len(approved), runs, selected=len(selected), approved=len(approved))

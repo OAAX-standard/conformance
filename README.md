@@ -24,7 +24,7 @@ Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker
 | `runtime/lifecycle` | a working `init` (device, or the CPU runtime) | `init`/`cleanup` rules, error text, cycles, threads, unload, memory, exit |
 | `runtime/model` | a model the runtime can load (+ the device) | enqueue/retrieve, id echo, multi-model routing, timeouts, concurrency, input validation, leaks |
 | `toolchain` | the Docker image | arguments, exit codes, log and manifest, no root / no network, output integrity, hostile input |
-| `e2e` | both | convert, load, run, compare with the ONNX reference within the declared precision |
+| `e2e` | both | convert, load, run, compare with the ONNX reference (`rtol 1e-4`, `atol 1e-5`, a fixed tolerance: no precision is declared yet) |
 
 ## Test levels
 
@@ -67,7 +67,7 @@ uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax
 The CPU runtime loads any `.onnx` file, here the small model shipped with the suite. For a real device pass a model in the format that runtime loads (the output of its toolchain).
 This runtime has known findings (issues
 [#45](https://github.com/OAAX-standard/reference-implementation/issues/45) to [#49](https://github.com/OAAX-standard/reference-implementation/issues/49)),
-so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-20`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost),
+so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost; `RT-M-20`, `-22` and `-24` are N/A with this model: one input, nothing to leave out),
 `RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` WARN, `RT-M-17` BLOCKED (the tiny model answers faster than the suite can time). `RT-M-35` (memory growth over init/load/cleanup cycles, #47) is an RSS measurement:
 it shows with some models (a 1 MB face detector grows 12 MB) and not with others, so a PASS there is weaker than a FAIL. Open `report.html` in `--out` to see what each check did.
 
@@ -85,8 +85,10 @@ Useful options (all in `--help`): `--model FILE` is a model the runtime can load
 to know what the model takes: it reads an `oaax-manifest.json` next to the model or the `.onnx` file itself, and `--input NAME:DTYPE:DIMS` (use `?` for
 a dynamic dimension) overrides both, which is also how to describe a runtime that takes another data type or layout than the ONNX model. `--timeout`
 (seconds per scenario, default 300) and `--round-trip-timeout` are for slow devices: loops stop at 60% of the timeout, and a call still running at the
-limit is `BLOCKED`, not failed. `--skip ID` leaves a test out; `--hardware-safe` shrinks cycles and floods, pauses between scenarios and skips the
-deliberately abusive tests (NULL pointers, exit without cleanup, cleanup during a blocked call, request flood). `--workdir DIR` runs the harness in a given
+limit is `BLOCKED`, not failed. `--skip ID` leaves a test out; `--hardware-safe` shrinks cycles (3) and floods, pauses between scenarios and skips the
+deliberately abusive tests (NULL pointers, exit without cleanup, cleanup during a blocked call, request flood). A check that passes on fewer cycles than its title says carries a
+`note` (console Details, JSON, JUnit, HTML); the two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and are `BLOCKED` with a hint otherwise, so a `--hardware-safe` run does not
+measure memory growth. `--workdir DIR` runs the harness in a given
 directory; `--quiet` hides the progress lines on stderr.
 
 Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
@@ -99,7 +101,7 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
 
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
-crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
+crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. With `--only` the console says "Only N of M approved checks were selected" and the JSON (`summary.checks_selected`) and JUnit (`checks_selected` property) record it; the exit code only covers the checks that ran. The suite tests itself against a mock runtime and a mock toolchain with
 injected faults: `uv run pytest`.
 
 ### Toolchains

@@ -209,7 +209,7 @@ def test_b4_symlinks_are_listed_never_followed_nor_read(tmp_path):
 
     from oaax_conformance.toolchain import Conversion
 
-    run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1}})
+    run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1, "reg": True}})
     assert list(Conversion.files(run)) == ["ok.onnx"]  # links are neither models nor logs
 
 
