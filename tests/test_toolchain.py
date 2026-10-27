@@ -323,3 +323,16 @@ def test_a_huge_log_is_reported_not_read_into_memory(build_dir, mock_io_onnx, to
     monkeypatch.setattr(checks, "MAX_JSON_BYTES", 1 << 20)
     result = _run(_context(build_dir, mock_io_onnx, CLEAN, "huge_log", tmp_path, with_runtime=False), ["TC-21"])["TC-21"]
     assert result.outcome == "warn" and "2 MB" in result.message and "not checked" in result.message
+
+
+# ---- round 5, A8: one hung baseline conversion costs one timeout ------------------------------------------------------------------------------
+
+def test_a_toolchain_that_hangs_on_a_valid_model_costs_one_timeout_not_one_per_conversion(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A8: every one of the ~15 conversions was tried and timed out on its own (hours with the default 900 s); when the baseline hangs they are blocked at once."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path, with_runtime=False)
+    ctx.timeout = 4
+    started = time.monotonic()
+    results = _run(ctx, ["TC-01", "TC-02", "TC-03", "TC-05", "TC-30", "TC-31"])
+    assert time.monotonic() - started < 12  # one 4 s timeout, not six
+    assert {r.outcome for r in results.values()} == {"blocked"}
+    assert "the other conversions are not tried" in results["TC-02"].message and "--timeout" in results["TC-30"].message

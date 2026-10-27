@@ -95,6 +95,7 @@ class Workspace:
 
 
 KEEP_BYTES = 1 << 20
+BASELINE = "valid"  # the conversion every other result is judged against
 
 
 def _drop_big_files(directory: Path) -> None:
@@ -249,6 +250,8 @@ class ToolchainContext:
             raise Blocked(self.docker_failure)
         if name in self.timeouts:
             raise Blocked(self.timeouts[name])
+        if BASELINE in self.timeouts:  # the image hangs on a valid model: trying the other ~15 conversions would cost 15 more timeouts
+            raise Blocked(self.timeouts[BASELINE])
         if name in self._runs:
             return self._runs[name]
         if self.progress:
@@ -303,6 +306,13 @@ class ToolchainContext:
             _drop_big_files(ws.out_dir)
         if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
             self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"
+            if name == BASELINE:
+                self.timeouts[BASELINE] = (f"the conversion of a valid model did not finish within {self.timeout} s (the spec sets no limit), so the other conversions "
+                                           "are not tried: raise --timeout if the model is just big")
+                if self.progress:
+                    import sys
+
+                    print(f"  {self.timeouts[BASELINE]}", file=sys.stderr, flush=True)
             raise Blocked(self.timeouts[name])
         self._runs[name] = run
         if code == DOCKER_ERROR and not out and b"docker" in err.lower():  # docker's own failure (bad --docker-arg, daemon, GPU runtime): a rejection by the toolchain looks different
