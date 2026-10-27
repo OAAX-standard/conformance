@@ -1,0 +1,47 @@
+name: publish
+# Uploads the wheels of a GitHub Release to PyPI with trusted publishing (OpenID Connect: no token is stored anywhere).
+#   1. a tag vX.Y.Z: build.yml tests it and drafts the release (wheels + SHA256SUMS).
+#   2. a maintainer reviews the draft and presses Publish: this workflow starts, waits for the reviewer of the `pypi` environment,
+#      then uploads THE SAME wheels whose sha256 are in the release notes (nothing is rebuilt).
+# One-time setup, on PyPI (Account > Publishing > pending publisher): project oaax-conformance, owner OAAX-standard, repository conformance,
+# workflow publish.yml, environment pypi. On GitHub: the `pypi` environment (required reviewer, tags v* only).
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  pypi:
+    if: github.repository == 'OAAX-standard/conformance' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oaax-conformance/
+    permissions:
+      contents: read    # download the release assets
+      id-token: write   # trusted publishing; nothing else gets this permission
+    steps:
+      - name: Take the wheels of this release and check they are the tagged ones
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          mkdir release dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.whl' --pattern SHA256SUMS --dir release
+          count=$(ls release/*.whl | wc -l)
+          test "$count" -ge 1
+          # every wheel listed in the checksums is here, and only those
+          test "$(grep -c '\.whl$' release/SHA256SUMS)" = "$count" || { echo "SHA256SUMS lists a different number of wheels than the release has"; exit 1; }
+          for path in release/*.whl; do
+            wheel=$(basename "$path")
+            (cd release && grep -F "$wheel" SHA256SUMS | sha256sum -c -)   # the file is the one in the release's checksums
+            test "$(echo "$wheel" | cut -d- -f2)" = "${TAG#v}" || { echo "wheel $wheel does not match tag $TAG"; exit 1; }
+            cp "$path" dist/
+          done
+          ls -l dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist
