@@ -74,3 +74,14 @@ def test_the_release_workflow_keeps_its_guards():
         assert needle in text, needle
     assert "| head" not in text and "| tee" not in text  # GitHub's default shell has no pipefail: a pipe hides the exit status
     assert "no-such-test" not in text
+
+
+def test_every_yaml_file_under_dot_github_parses():
+    """GitHub drops an issue form it cannot parse without saying so, and a workflow with invalid YAML fails only when it is needed (the tag-only steps never
+    run in a pull request)."""
+    import yaml
+
+    files = [p for ext in ("yml", "yaml") for p in (ROOT / ".github").rglob(f"*.{ext}")]
+    assert len(files) >= 5
+    for path in files:
+        yaml.safe_load(path.read_text())
