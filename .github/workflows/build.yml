@@ -31,9 +31,9 @@ jobs:
       - name: The wheel is a valid platform wheel (the binary needs glibc 2.17 at most, the long description renders)
         shell: bash
         run: |
-          uvx auditwheel show dist/*.whl > audit.txt
+          uvx auditwheel show dist/*.whl > audit.txt   # the sentence before the quoted tag differs per architecture; the quoted tag line is the verdict
           cat audit.txt
-          grep -q 'constrains the platform tag to "manylinux_2_17_' audit.txt || { echo "the harness needs a newer glibc than the wheel tag says: fix the tag in scripts/build-wheel.sh"; exit 1; }
+          grep -Eq '^"manylinux_2_17_[a-z0-9_]+"\.?$' audit.txt || { echo "the harness needs a newer glibc than the wheel tag says: fix the tag in scripts/build-wheel.sh"; exit 1; }
           uvx twine check dist/*.whl
       - name: Smoke test in a bare container without a compiler (the whole runtime tier on the published reference CPU runtime)
         shell: bash
