@@ -61,6 +61,12 @@ def test_a_slow_first_inference_does_not_fail_the_round_trip(build_dir, monkeypa
     assert {i: r.outcome for i, r in results.items()} == {"RT-M-08": "pass", "RT-M-02": "pass", "RT-M-09": "pass"}
 
 
+def test_a_device_that_is_slow_on_every_request_gets_a_timeout_that_matches(build_dir, monkeypatch):
+    # every request takes 3 s, the round-trip budget is 1.5 s: the first answered request must raise the timeout of the later ones
+    results = _run(build_dir, "slow_every", ["RT-M-08", "RT-M-09"], monkeypatch, warmup_ms=20000)
+    assert {i: r.outcome for i, r in results.items()} == {"RT-M-08": "pass", "RT-M-09": "pass"}
+
+
 def test_a_call_that_stalls_is_blocked_not_failed(build_dir, monkeypatch):
     results = _run(build_dir, "hang_init", ["RT-L-01"], monkeypatch, timeout=5)
     assert results["RT-L-01"].outcome == "blocked" and "--timeout" in results["RT-L-01"].message
@@ -486,6 +492,23 @@ def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch,
     assert "no test ran" in capsys.readouterr().err
 
 
+def test_only_with_a_draft_test_id_exits_3_not_0(build_dir, tmp_path, monkeypatch, capsys):
+    """The real path, no stub: a draft test is a known id that runs nothing, and "0 checks" must not look like a pass."""
+    from oaax_conformance import specdocs
+
+    specs = tmp_path / "specs"
+    specs.mkdir()
+    for f in (specdocs.spec_dir()).glob("*.md"):
+        (specs / f.name).write_text(f.read_text())
+    text = (specs / "runtime-static-lifecycle.md").read_text()
+    row = next(l for l in text.splitlines() if l.startswith("| RT-S-01 |"))
+    (specs / "runtime-static-lifecycle.md").write_text(text.replace(row, row.rsplit("approved", 1)[0] + "draft |"))
+    monkeypatch.setattr(specdocs, "spec_dir", lambda: specs)
+    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", "--only", "RT-S-01"]
+    assert cli.main(argv) == 3
+    assert "no test ran" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("sig,code", [("SIGTERM", 143), ("SIGHUP", 129)])  # D4: a closed terminal is the same hole as a CI timeout
 def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch, sig, code):
     """D1: a CI timeout (SIGTERM) used to kill only the suite and leave the harness, and the device it holds, running."""
@@ -511,6 +534,20 @@ def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeyp
         time.sleep(0.2)
     assert pgrep() == [], "the harness outlived the suite"
     assert b"Traceback" not in suite.stderr.read()
+
+
+def test_a_hangup_that_nohup_ignored_stays_ignored(build_dir, monkeypatch):
+    import signal
+
+    seen = {}
+    monkeypatch.setattr(cli, "_runtime", lambda args: seen.update(hup=signal.getsignal(signal.SIGHUP), term=signal.getsignal(signal.SIGTERM)) or 0)
+    old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        assert cli.main(["runtime", str(build_dir / "libmock_runtime.so")]) == 0
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN  # restored as it was
+    finally:
+        signal.signal(signal.SIGHUP, old)
+    assert seen["hup"] is signal.SIG_IGN and seen["term"] is cli._terminate
 
 
 def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_dir, capsys, tmp_path):

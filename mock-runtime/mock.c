@@ -301,7 +301,7 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     static int corrupt_count;
     if (fault("corrupt_every_7th") && ++corrupt_count % 7 == 0) r->y[0] += 1.0f;
     if (fault("wrong_output")) r->y[0] += 1.0f;
-    r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0);
+    r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0) + (fault("slow_every") ? 3000 : 0);
     first_request_done = 1;
   }
   pthread_mutex_lock(&lock);

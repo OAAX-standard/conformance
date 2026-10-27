@@ -1,7 +1,7 @@
 """oaax-conformance runtime|toolchain ...
 
 Exit codes: 0 no MUST check failed; 1 a MUST check failed; 2 nothing failed but a MUST check could not run or was skipped (INCOMPLETE);
-3 bad command line, missing file/Docker/image; 4 a check of the suite itself crashed (a bug of the suite); 130 interrupted."""
+3 bad command line, missing file/Docker/image; 4 a check of the suite itself crashed (a bug of the suite); 130 / 143 / 129 stopped by Ctrl-C / SIGTERM / SIGHUP."""
 import argparse
 import os
 import signal
@@ -223,7 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     if problem:
         return usage_error(problem)
     main_thread = threading.current_thread() is threading.main_thread()
-    previous = {s: signal.signal(s, _terminate) for s in (signal.SIGTERM, signal.SIGHUP)} if main_thread else {}
+    # `nohup oaax-conformance ...` ignores SIGHUP on purpose: keep it ignored
+    caught = [signal.SIGTERM] + ([] if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else [signal.SIGHUP])
+    previous = {s: signal.signal(s, _terminate) for s in caught} if main_thread else {}
     try:
         return _runtime(args) if args.command == "runtime" else _toolchain(args)
     except KeyboardInterrupt:
