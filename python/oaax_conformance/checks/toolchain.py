@@ -441,10 +441,21 @@ def _io_views(model_path: str, doc: dict | None):
     return None
 
 
+def _manifest_of(ctx, path):
+    """(the usable manifest, why it does not apply): it applies to the judged file only when it names it. A manifest that describes another file says nothing about
+    this one (E2E-02 and E2E-04 already ignore it through modelio), so no check may take its inputs, outputs or `equivalent` for this file's."""
+    doc = _manifest_doc(_valid(ctx))
+    if doc and doc.get("model_file") != Path(path).name:
+        return None, f"the manifest describes {doc.get('model_file')}, not {Path(path).name}: it cannot say what the judged file takes and returns"
+    return doc, None
+
+
 @check("E2E-03")
 def io_is_retained(ctx):
     _, path = _converted(ctx)
-    doc = _manifest_doc(_valid(ctx))
+    doc, elsewhere = _manifest_of(ctx, path)
+    if elsewhere:
+        raise Blocked(elsewhere)
     if doc and doc.get("equivalent") is False:
         raise Fail("the manifest declares equivalent: false: the runtime does not return the original model's outputs "
                    f"(it returns {', '.join(t['name'] for t in doc['outputs'])}); the spec requires the names and shapes to be retained")
@@ -476,7 +487,8 @@ def same_results(ctx):
                       "the e2e extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]'` with the wheel")
     from ..reference import deterministic_input
 
-    doc = _manifest_doc(_valid(ctx))
+    _, judged = _converted(ctx)
+    doc, _ = _manifest_of(ctx, judged)  # a manifest of another file does not tell whether THIS file's outputs are the original's
     if doc and doc.get("equivalent") is False:
         raise NotApplicable("the manifest declares equivalent: false: the outputs are not the original's, so there is nothing to compare")
     rctx, path, run, answered = _runtime_run(ctx, "roundtrip")

@@ -595,3 +595,20 @@ def test_a_normal_deep_tree_is_copied_and_the_entry_cap_applies(tmp_path, monkey
             tree(ws.out_dir)
     finally:
         remove_tree(ws.root)
+
+
+def test_e2e_03_does_not_take_the_manifest_of_another_file_for_the_judged_ones_io(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D5: with --model-file a-copy.bin the manifest (which names model.bin) was used for E2E-03 while E2E-02/04 correctly ignored it: a MUST PASSED on I/O it never read."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path)
+    ctx.model_file = "a-copy.bin"
+    results = _run(ctx, ["E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    assert results["E2E-01"].outcome == "pass"
+    assert results["E2E-03"].outcome == "blocked" and "the manifest describes model.bin, not a-copy.bin" in results["E2E-03"].message
+    assert results["E2E-02"].outcome == "blocked" and results["E2E-04"].outcome == "blocked"  # the same file judged by all four, with the same information
+    for r in results.values():
+        assert "a-copy.bin" in r.note
+
+
+def test_a_manifest_that_names_the_judged_file_still_counts(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, None, tmp_path), ["E2E-03"])
+    assert results["E2E-03"].outcome == "pass"
