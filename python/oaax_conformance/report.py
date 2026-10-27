@@ -84,6 +84,7 @@ DISCLAIMER = "This run covers only the approved tests; it is not a full conforma
 # Everything XML 1.0 cannot hold (C0, U+FFFE/FFFF, lone surrogates) plus what can hijack a terminal or reorder text (C1 incl. CSI, bidi overrides).
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff\ufffe\uffff]")
 _SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/(?:tmp\w{6,}|oaax-conformance-(?:dump-)?\w{6,})")  # the scenario's own working directory (no --workdir) and our workspaces
+MIN_SECRET = 3  # values shorter than this are not masked: `pin=42` would turn every "42" of every message into ***
 MAX_TEXT = 20000  # a runtime can return megabytes of error text
 
 
@@ -133,7 +134,17 @@ def secret_values(init_config: list[str], docker_args: list[str]) -> list[str]:
     for _, _, pair in env_options(docker_args):
         name, sep, value = pair.partition("=")
         values.append(value if sep else os.environ.get(name, ""))
-    return [v for v in values if len(v) >= 3]  # a one-character "secret" would shred every message
+    return [v for v in values if len(v) >= MIN_SECRET]  # a one-character "secret" would shred every message
+
+
+def short_secret_names(init_config: list[str], docker_args: list[str]) -> list[str]:
+    """Names of the --init-config keys and docker environment variables whose value is too short to be hidden (1 or 2 characters: see secret_values)."""
+    names = [pair.split("=", 1)[0] for pair in init_config if "=" in pair and 0 < len(pair.split("=", 1)[1]) < MIN_SECRET]
+    for _, _, pair in env_options(docker_args):
+        name, sep, value = pair.partition("=")
+        if 0 < len(value if sep else os.environ.get(name, "")) < MIN_SECRET:
+            names.append(name)
+    return names
 
 
 def _document(suite, spec_version: str, subject: dict, options: dict, private_paths: list[str], secrets: list[str]) -> dict:

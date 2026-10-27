@@ -30,6 +30,9 @@ def library_problem(path: str) -> str | None:
     if len(head) < 52 or head[4] not in (1, 2) or head[5] not in (1, 2):
         return "has an invalid ELF header"
     endian = "<" if head[5] == 1 else ">"
+    kind = struct.unpack(endian + "H", head[16:18])[0]
+    if kind != 3:  # ET_DYN: a shared library (a position-independent executable is ET_DYN too: dlopen tells those apart)
+        return {2: "is an executable, not a shared library", 1: "is an object file, not a shared library", 4: "is a core dump"}.get(kind, f"is not a shared library (ELF type {kind})")
     machine = struct.unpack(endian + "H", head[18:20])[0]
     host_name, host = platform.machine(), HOST.get(platform.machine().lower())
     if host and machine != host:

@@ -62,6 +62,8 @@ The two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and 
 - **Shown as given**: other docker flags (`--label`, `--add-host`...), so keep secrets out of them.
 - **Refused**: `--env-file` (its values cannot be kept out of the reports), and a cluster of short flags the suite cannot read with certainty (exit 3).
 - Secrets are removed before a text is cut to its tail, never after.
+- **Values shorter than 3 characters are not masked** (`--init-config pin=42`, `-e A=1`): a one-character value would turn every such character of every message into `***`. The suite says so at the start ("note: the value of pin is too short to be hidden in reports"). Give a secret a longer value, or keep it out of the options.
+- A refusal message never echoes an environment value: an argument that carries one is printed masked (`-dteTOKEN=***`), a cluster the reader cannot parse only by its flag letters.
 
 ## `--docker-arg` rules
 

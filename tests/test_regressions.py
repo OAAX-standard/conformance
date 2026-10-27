@@ -998,3 +998,54 @@ def test_the_docs_list_what_is_refused():
     reference = (root / "docs" / "reference.md").read_text()  # the README links to it: the list of refused flags lives there only
     for flag in ("`-d`/`--detach`", "`--restart`", "`--cidfile`", "`-i`/`--interactive`"):
         assert flag in reference, flag
+
+
+# ---- round 7 (D7): the masking floor is documented and announced; a refusal never echoes a secret --------------------------------------------
+
+def test_values_under_three_characters_are_named_in_a_note_and_not_masked(capsys):
+    """D7: `--init-config pin=42` is not masked (a 1-2 character value would shred every message); that was silent."""
+    assert report.short_secret_names(["pin=42", "license=SECRET123", "x=", "k=v"], ["-e", "A=1", "-e", "B=long-enough", "-eC=zz"]) == ["pin", "k", "A", "C"]
+    assert report.secret_values(["pin=42"], ["-e", "A=1"]) == []  # unchanged: the floor stays
+    assert cli.main(["toolchain", "x", "--init-config", "pin=42", "--docker-arg=-e", "--docker-arg=A=1"]) == 3  # no such image: stops after the note
+    err = capsys.readouterr().err
+    assert "note: the values of pin, A are too short to be hidden in reports (values under 3 characters are not masked)" in err
+
+
+def test_no_note_when_every_value_can_be_hidden(capsys):
+    cli.main(["toolchain", "x", "--init-config", "license=SECRET123"])
+    assert "too short to be hidden" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["-xeTOKEN=hunter2"], ["-dteTOKEN=hunter2"], ["-teTOKEN=hunter2", "-i"], ["-Ptu0", "-eTOKEN=hunter2", "-i"], ["-dteTOKEN=hunter2", "-i"]])
+def test_a_refusal_never_echoes_an_environment_value(args, capsys):
+    """D7: the message for a cluster the reader cannot parse (and for a foreground flag in a cluster with `-e`) printed the whole argument, secret included."""
+    assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
+    err = capsys.readouterr().err
+    assert "hunter2" not in err, err
+
+
+def test_the_docs_state_the_masking_floor():
+    from pathlib import Path
+
+    reference = (Path(__file__).resolve().parent.parent / "docs" / "reference.md").read_text()
+    assert "Values shorter than 3 characters are not masked" in reference and "too short to be hidden" in reference
+
+
+# ---- round 7 (D8): the toolchain tier's --runtime gets the same one-line check as `runtime LIB` --------------------------------------------------
+
+def test_an_executable_given_as_the_toolchain_runtime_is_one_line(build_dir, tmp_path, capsys):
+    """D8: `toolchain IMG --runtime LIB` went on to run every conversion and then BLOCKED the end-to-end tests; an ET_EXEC or PIE executable is refused up front."""
+    import shutil
+
+    et_exec = tmp_path / "libexec.so"
+    data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+    data[16:18] = (2).to_bytes(2, "little")  # ET_EXEC
+    et_exec.write_bytes(bytes(data))
+    pie = tmp_path / "libpie.so"
+    shutil.copy(shutil.which("true"), pie)
+    for path, expect in ((et_exec, "is an executable, not a shared library"), (pie, "cannot dynamically load")):
+        assert cli.main(["toolchain", "x", "--runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+        err = capsys.readouterr().err
+        assert expect in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
+    assert cli.main(["runtime", str(et_exec), "--harness", str(build_dir / "oaax-harness")]) == 3  # and `runtime LIB` agrees
+    assert "is an executable" in capsys.readouterr().err

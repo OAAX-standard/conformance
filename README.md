@@ -108,7 +108,7 @@ With `--out DIR` the suite writes:
 | `report.json` | tools, archives | everything in the page, plus library sha256, platform and full call transcripts |
 | `junit.xml` | CI | `failures` = failed; `errors` = crashed checks and MUSTs that could not run; `skipped` = other blocked checks and every n/a (with the reason); passed = pass + warn |
 
-Reports never contain the values of `--init-config` or of docker environment variables, and directories are removed from every message
+Reports never contain the values of `--init-config` or of docker environment variables (values shorter than 3 characters excepted: the suite says so at the start), and directories are removed from every message
 ([details](docs/reference.md#what-reports-keep-out)).
 
 ## Known findings on the reference implementation
