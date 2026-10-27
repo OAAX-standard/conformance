@@ -16,15 +16,30 @@ first: it sets out the guidelines for the whole project, including the sign-off 
 scripts/build.sh && uv sync && uv run pytest -n auto
 ```
 
-To add a test: write it in `docs/tests/` first (level, source clause, pass condition) and get it `approved`, then implement the check in
-`python/oaax_conformance/checks/` with `@check("<ID>")` and add a fault to `mock-runtime/mock.c` plus a case in `tests/test_suite.py`
-that makes it fail. The self-tests insist on all three.
+### Adding a test
 
-The toolchain self-tests build small mock toolchain images (`mock-toolchain/`) and need Docker; without it they are skipped. To build them from an
-image you already have instead of pulling `python:3.11-slim`, set `OAAX_MOCK_BASE` to any image that has python3 (for example the CPU toolchain).
-For a new toolchain test, add a fault to `mock-toolchain/mock_toolchain.py` and a case to `tests/test_toolchain.py`.
+1. Write it in `docs/tests/` first (level, source clause, pass condition) and get it `approved`.
+2. Implement the check in `python/oaax_conformance/checks/` with `@check("<ID>")`.
+3. Add a fault to `mock-runtime/mock.c` (or `mock-toolchain/mock_toolchain.py`) that makes the check fail.
+4. Add a case in `tests/test_suite.py` (or `tests/test_toolchain.py`) that proves it.
+
+The self-tests insist on all of it.
+
+### Toolchain self-tests
+
+They build small mock toolchain images (`mock-toolchain/`) and need Docker; without it they are skipped.
+To build them from an image you already have instead of pulling `python:3.11-slim`, set `OAAX_MOCK_BASE` to any image that has python3 (for example the CPU toolchain).
 
 ## Releasing (maintainers)
 
-Set `__version__` in `python/oaax_conformance/__init__.py` (the one place) and move the `CHANGELOG.md` entry from "unreleased" to the version and a date (`## 0.1.0 - 2026-11-03`). Push a tag `vX.Y.Z` on `main`:
-the `build` workflow checks that the tag is a commit of `main` and matches the version, that the CHANGELOG heading is dated, builds and smoke-tests the wheel (specs inside, exit codes), and creates a **draft** GitHub Release with the wheel, the checksums and the CHANGELOG notes for a maintainer to review and publish. A re-run refuses if a release for the tag exists. Nothing goes to PyPI.
+1. Set `__version__` in `python/oaax_conformance/__init__.py` (the one place).
+2. In `CHANGELOG.md`, move the entry from "unreleased" to the version and a date (`## 0.1.0 - 2026-11-03`).
+3. Push a tag `vX.Y.Z` on `main`.
+
+The `build` workflow then:
+
+- checks that the tag is a commit of `main`, matches the version, and that the CHANGELOG heading is dated;
+- builds and smoke-tests the wheel (specs inside, exit codes);
+- creates a **draft** GitHub Release with the wheel, the checksums and the CHANGELOG notes, for a maintainer to review and publish.
+
+A re-run refuses if a release for the tag exists. Nothing goes to PyPI.

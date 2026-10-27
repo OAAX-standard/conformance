@@ -3,20 +3,45 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: 0.1.0, Linux only.** The runtime tiers (static, lifecycle, model) and the toolchain / end-to-end tiers run; every test is specified in
-> [docs/tests/](docs/tests/) (level, quoted spec clause, what the C++ CPU runtime and toolchain do today).
+> **Status: 0.1.0, Linux only.** Every test is specified in [docs/tests/](docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
 
-## Principles
+## Quick start
 
-- **Easy for implementers**: one command, no setup beyond Docker/Python, readable failures: each failure names the spec
-  clause and says what to fix.
+Needs `git`, [uv](https://docs.astral.sh/uv/), `cmake` and a C compiler (`sudo apt install build-essential cmake`); Docker for toolchains.
+
+```bash
+git clone https://github.com/OAAX-standard/conformance && cd conformance
+scripts/build.sh && uv sync                     # builds the C harness (into ./build) and the Python environment
+
+# your own runtime or toolchain
+uv run oaax-conformance runtime ./libRuntimeLibrary.so --model FILE [--init-config key=value]... [--out DIR]
+uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--runtime ./libRuntimeLibrary.so] [--out DIR]
+```
+
+No `--model`: the tests that send requests are `BLOCKED` and the run is `INCOMPLETE` (exit 2).
+Open `report.html` in `--out` to see what each check did.
+
+### Try it on the reference CPU runtime and toolchain
+
+```bash
+mkdir -p /tmp/rt && curl -sSL https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz | tar xz -C /tmp/rt
+uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax_conformance/models/tiny-conv.onnx --out /tmp/report-rt   # ~20 s
+
+curl -sSL -o /tmp/oaax-cpu-toolchain.tar https://nbg1.your-objectstorage.com/oaax/conversion-toolchain/2.0.0/CPU/oaax-cpu-toolchain.tar && docker load -i /tmp/oaax-cpu-toolchain.tar   # ~800 MB
+uv run oaax-conformance toolchain oaax-cpu-toolchain:2.0.0 --runtime /tmp/rt/libRuntimeLibrary.so --out /tmp/report-tc   # ~30 s
+```
+
+**Exit code 1 is the expected result** for both: they have [known findings](#known-findings-on-the-reference-implementation).
+
+## What it checks
+
+- **Easy for implementers**: one command, no setup beyond Docker/Python; each failure names the spec clause and says what to fix.
 - **Dead simple for users**: a pass means "this runtime/toolchain can be swapped for another one without code changes".
-- **Strict on the raw API**: the suite talks to the runtime's C API directly, never through a tolerant wrapper.
-- **Safe on real hardware**: loops stop at a time budget, request sizes are capped, a slow device is `BLOCKED` and never `FAIL`, and `--hardware-safe` leaves
-  out the deliberately abusive tests.
+- **Strict**: the suite talks to the runtime's C API directly, never through a tolerant wrapper.
+- **Safe on real hardware**: loops stop at a time budget, request sizes are capped, a slow device is `BLOCKED` and never `FAIL`, and `--hardware-safe` leaves out the abusive tests.
 - **Runs anywhere**: the static tier needs no accelerator, no model and no `init`.
 
-## Tiers
+### Tiers
 
 | Tier | Needs | Checks |
 | ---- | ----- | ------ |
@@ -24,112 +49,93 @@ Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker
 | `runtime/lifecycle` | a working `init` (device, or the CPU runtime) | `init`/`cleanup` rules, error text, cycles, threads, unload, memory, exit |
 | `runtime/model` | a model the runtime can load (+ the device) | enqueue/retrieve, id echo, multi-model routing, timeouts, concurrency, input validation, leaks |
 | `toolchain` | the Docker image | arguments, exit codes, log and manifest, runs without root / without network / read-only, output integrity, hostile input |
-| `e2e` | both | convert, load, run, compare with the ONNX reference (`rtol 1e-4`, `atol 1e-5`, a fixed tolerance: no precision is declared yet) |
+| `e2e` | both | convert, load, run, compare with the ONNX reference (`rtol 1e-4`, `atol 1e-5`: a fixed tolerance, no precision is declared yet) |
 
-## Test levels
+### The toolchain tier at a glance
 
-Every test carries the spec clause it comes from and a level:
+The suite converts a small built-in model (or `--onnx FILE`) in temporary directories and runs your image:
 
-- **MUST**: required by the specification text of the version under test. A failure fails the run.
-- **SHOULD**: recommended by the text. A failure is a warning.
-- **PROPOSED**: behaviour planned for the next version. Always a warning, so the suite can lead the specification.
+- **Sandboxed by default**: `--cap-drop ALL`, `no-new-privileges` and a process limit on every run (`--docker-arg` can add back what an image really needs, which is worth reporting to its vendor).
+- **Repeated under restrictions**: as an arbitrary unprivileged user (TC-02), without network (TC-03), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output (TC-38). Network stays on in the other runs: a toolchain that needs it is a finding, not a block.
+- **Hostile inputs**: empty, garbage, truncated, missing, a zip with `../` members.
+- **End to end** (`--runtime LIB`): loads the converted model in that runtime and compares the results with onnxruntime.
 
-## Install (Linux)
+More in [docs/reference.md](docs/reference.md#the-toolchain-tier).
 
-You need `git`, [uv](https://docs.astral.sh/uv/), Docker (toolchain tier only) and, for the runtime tier, `cmake` and a C compiler (`sudo apt install build-essential cmake`).
+### Levels
 
-```bash
-git clone https://github.com/OAAX-standard/conformance && cd conformance
-scripts/build.sh                       # builds the C harness of the runtime tier (and the mock runtimes of the self-tests) into ./build
-uv sync                                # creates .venv; uv run oaax-conformance --version
-```
+| Level | Meaning | A failure is |
+| ----- | ------- | ------------ |
+| **MUST** | required by the specification text of the version under test | a failed run |
+| **SHOULD** | recommended by the text | a warning |
+| **PROPOSED** | planned for the next version, so the suite can lead the specification | always a warning |
 
-The wheel of a release needs Python 3.12 or newer: `uv tool install --python 3.12 oaax_conformance-X.Y.Z-py3-none-any.whl` (uv fetches that Python if your default is older).
-It is enough for the **toolchain** tier without `--runtime`. It does not contain the C harness, so the **runtime** tier and the end-to-end toolchain tests (`toolchain IMAGE --runtime LIB`)
-need a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere). Reading `.onnx` models (`--onnx`, the runtime tier's `--model`) needs the `onnx` extra:
-`uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'`; a checkout has it after `uv sync`.
+## Install
 
-## Usage
+| You want | Do | Covers |
+| -------- | -- | ------ |
+| Everything | a checkout: `scripts/build.sh && uv sync` (see Quick start) | all tiers |
+| Toolchain tier only | `uv tool install --python 3.12 oaax_conformance-X.Y.Z-py3-none-any.whl` | `toolchain IMAGE` without `--runtime` |
+| Reading `.onnx` files from the wheel | `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` | `--onnx`, the runtime tier's `--model` |
 
-```bash
-uv run oaax-conformance runtime ./libRuntimeLibrary.so [--init-config key=value]... [--model FILE] [--input NAME:DTYPE:DIMS]... [--hardware-safe] [--out DIR]
-```
+- The wheel needs Python 3.12 or newer (uv fetches it if your default is older).
+- The wheel does **not** contain the C harness: the runtime tier and the end-to-end tests (`toolchain IMAGE --runtime LIB`) need a checkout, or `--harness PATH` / `OAAX_HARNESS` pointing at a harness built elsewhere.
 
-Without `--model` the tests that send requests are `BLOCKED` and the run is `INCOMPLETE` (exit 2).
-
-### Try it on the reference CPU runtime
-
-```bash
-mkdir -p /tmp/rt && curl -sSL https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz | tar xz -C /tmp/rt
-uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax_conformance/models/tiny-conv.onnx --out /tmp/report-rt     # ~20 s
-```
-
-The CPU runtime loads any `.onnx` file, here the small model shipped with the suite. For a real device pass a model in the format that runtime loads (the output of its toolchain).
-This runtime has known findings (issues
-[#45](https://github.com/OAAX-standard/reference-implementation/issues/45) to [#49](https://github.com/OAAX-standard/reference-implementation/issues/49)),
-so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost; `RT-M-20`, `-22` and `-24` are N/A with this model: one input, nothing to leave out),
-`RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` WARN, `RT-M-17` BLOCKED (the tiny model answers faster than the suite can time). `RT-M-35` (memory growth over init/load/cleanup cycles, #47) is an RSS measurement:
-it shows with some models (a 1 MB face detector grows 12 MB) and not with others, so a PASS there is weaker than a FAIL. Open `report.html` in `--out` to see what each check did.
-
-### Reading the results
+## Reading the results
 
 | Status | Meaning |
 | ------ | ------- |
 | `PASS` | the behaviour is as the spec clause says |
-| `FAIL` | a MUST is broken: the message names the clause and what to fix. Exit code 1 |
+| `FAIL` | a MUST is broken: the message names the clause and what to fix (exit 1) |
 | `WARN` | a SHOULD or PROPOSED check differs: worth fixing, never fails the run |
 | `BLOCKED` | the check could not run (no model, slow device, missing vendor key): the message says what to pass. A blocked MUST makes the run `INCOMPLETE` (exit 2) |
 | `N/A` | the check does not apply (for example no second input to leave out) |
 
-Useful options (all in `--help`): `--model FILE` is a model the runtime can load and enables the tests that send requests. To build them the suite needs
-to know what the model takes: it reads an `oaax-manifest.json` next to the model or the `.onnx` file itself, and `--input NAME:DTYPE:DIMS` (use `?` for
-a dynamic dimension) overrides both, which is also how to describe a runtime that takes another data type or layout than the ONNX model. `--timeout`
-(seconds per scenario, default 300) and `--round-trip-timeout` are for slow devices: loops stop at 60% of the timeout, and a call still running at the
-limit is `BLOCKED`, not failed. `--skip ID` leaves a test out; `--hardware-safe` shrinks cycles (3) and floods, pauses between scenarios and skips the
-deliberately abusive tests (NULL pointers, exit without cleanup, cleanup during a blocked call, request flood). A check that passes on fewer cycles than its title says carries a
-`note` (console Details, JSON, JUnit, HTML); the two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and are `BLOCKED` with a hint otherwise, so a `--hardware-safe` run does not
-measure memory growth. `--workdir DIR` runs the harness in a given
-directory; `--quiet` hides the progress lines on stderr.
+| Exit code | Meaning |
+| --------- | ------- |
+| `0` | no MUST check failed |
+| `1` | a MUST failed |
+| `2` | `INCOMPLETE`: nothing failed, but a MUST could not run or was skipped (`--skip`, `--hardware-safe`); for example `init` needs vendor keys: pass them with `--init-config` |
+| `3` | bad command line, missing file, Docker or image |
+| `4` | a check of the suite itself crashed: a bug of the suite, please report it |
+| `129` `130` `143` | stopped by SIGHUP, Ctrl-C or SIGTERM (the harness and any containers are stopped first) |
 
-Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
+With `--out DIR` the suite writes:
 
-- `report.html`: a self-contained page (works offline) with the verdict, the expected behaviour and spec clause of each test, what was observed,
-  and every call the harness made. Print it to PDF from the browser: the print layout opens every section.
-- `report.json`: everything in the page, for tools and archiving (library sha256, platform, per-test result with evidence, full call transcripts).
-  Values given to `--init-config` or as docker environment variables (`-e`, `--env`, in any spelling docker accepts: `-eNAME=V`, `-e=NAME=V`, clusters such as `-te NAME=V`, also `-e NAME` taken from your environment) are never stored, and directories are removed from every message. Other docker flags (`--label`, `--add-host`...) are shown as given, so keep secrets out of them; `--env-file` is refused, and so is a cluster of short flags the suite cannot read with certainty. The flags the suite sets itself (`--user`/`-u`, `-v`/`--volume`/`--mount`, `--network`/`--net`, `--entrypoint`, `--read-only`, `--privileged`, `--rm`, `--name`) are refused in every spelling (`-u0`, `-tu 0`, `-v/x:/y`, `--user=0`).
-- `junit.xml`: for CI. `failures` = failed, `errors` = crashed checks and MUSTs that could not run, `skipped` = the other blocked checks and every n/a (with the reason); passed = pass + warn, and the properties `outcome_pass`, `outcome_warn`... give the same counts as the console and `report.json`.
+| File | For | Contains |
+| ---- | --- | -------- |
+| `report.html` | people | a self-contained page (works offline, prints to PDF with every section open): verdict, expected behaviour and spec clause per test, what was observed, every call the harness made |
+| `report.json` | tools, archives | everything in the page, plus library sha256, platform and full call transcripts |
+| `junit.xml` | CI | `failures` = failed; `errors` = crashed checks and MUSTs that could not run; `skipped` = other blocked checks and every n/a (with the reason); passed = pass + warn |
 
-Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
-example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
-crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. With `--only` the console says "Only N of M approved checks were selected" and the JSON (`summary.checks_selected`) and JUnit (`checks_selected` property) record it; the exit code only covers the checks that ran. The suite tests itself against a mock runtime and a mock toolchain with
-injected faults: `uv run pytest`.
+Reports never contain the values of `--init-config` or of docker environment variables, and directories are removed from every message
+([details](docs/reference.md#what-reports-keep-out)).
 
-### Toolchains
+## Known findings on the reference implementation
 
-```bash
-curl -sSL -o /tmp/oaax-cpu-toolchain.tar https://nbg1.your-objectstorage.com/oaax/conversion-toolchain/2.0.0/CPU/oaax-cpu-toolchain.tar && docker load -i /tmp/oaax-cpu-toolchain.tar   # ~800 MB
-uv run oaax-conformance toolchain oaax-cpu-toolchain:2.0.0 --runtime /tmp/rt/libRuntimeLibrary.so --out /tmp/report-tc     # ~30 s
-```
+The reference CPU runtime and toolchain have known issues ([#45](https://github.com/OAAX-standard/reference-implementation/issues/45) to
+[#49](https://github.com/OAAX-standard/reference-implementation/issues/49)), so these results are **expected**:
 
-The reference CPU toolchain also has known findings ([#49](https://github.com/OAAX-standard/reference-implementation/issues/49)): expect exit code 1 with `TC-30` FAIL (an empty `.onnx` is accepted), `TC-35` FAIL
-(no log after a failed conversion), `TC-04`/`TC-05` WARN (it writes `model-simplified.onnx` into its input directory) and `TC-23` WARN (no manifest: planned for 2.1).
+| Subject | Check | Result | Why |
+| ------- | ----- | ------ | --- |
+| runtime | `RT-L-11` | WARN | exit without `cleanup` crashes |
+| runtime | `RT-M-19`, `-21`, `-23`, `-25` | FAIL | requests that do not match the model are accepted and lost |
+| runtime | `RT-M-20`, `-22`, `-24` | N/A | one input with this model: nothing to leave out |
+| runtime | `RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` | WARN | |
+| runtime | `RT-M-17` | BLOCKED | the tiny model answers faster than the suite can time |
+| runtime | `RT-M-35` | varies | memory growth is an RSS measurement (#47): a 1 MB face detector grows 12 MB, other models do not, so a PASS is weaker than a FAIL |
+| toolchain | `TC-30` | FAIL | an empty `.onnx` is accepted |
+| toolchain | `TC-35` | FAIL | no log after a failed conversion |
+| toolchain | `TC-04`, `TC-05` | WARN | it writes `model-simplified.onnx` into its input directory |
+| toolchain | `TC-23` | WARN | no manifest (planned for 2.1) |
 
-General form:
+## More
 
-```bash
-uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value [--model-file NAME]] [--docker-arg ARG]... [--out DIR]
-```
-
-Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
-image with all capabilities dropped (`--cap-drop ALL`, `no-new-privileges`, a process limit; `--docker-arg` can override), then repeats the conversion as an arbitrary unprivileged user (TC-02), without network (TC-03), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output (TC-38); network stays on in the other runs, because a toolchain that needs it is a finding, not a block. It also runs on hostile inputs (empty, garbage, truncated, missing, a zip
-with `../` members). With `--runtime LIB` it then loads the converted model in that runtime (a 2.0 toolchain has no manifest naming it: if it writes several files besides its log, the suite tries each and the one the runtime loads is the model; `--model-file NAME`, relative to the output directory, names it explicitly) and compares the results with onnxruntime
-(`uv sync` has it, and it needs the C harness of a checkout; the wheel alone cannot run these tests, see Install). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB). Each conversion works in a temporary directory under `$TMPDIR` (point it at a disk with room); the big files of a conversion are deleted as soon as it is done, except those of the first valid conversion (the end-to-end tests load it), so plan for about two to three times the size of your model. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
-
-See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+- [docs/reference.md](docs/reference.md): all options, what reports keep out, `--docker-arg` rules, how the toolchain tier works, disk use.
+- [docs/design.md](docs/design.md): architecture and direction for OAAX 2.1.
+- [docs/tests/](docs/tests/): the test specifications (under review).
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
+- The suite tests itself against a mock runtime and a mock toolchain with injected faults: `uv run pytest`.
 
 ## License
 

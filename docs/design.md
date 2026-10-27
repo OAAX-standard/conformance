@@ -26,8 +26,12 @@ itself and must not need the host's Docker socket handed to another container.
 
 ## Direction for OAAX 2.1
 
-Decided with the author while building the suite (2.0 is frozen; these become requirements in 2.1 and the suite will move their tests from PROPOSED to MUST for 2.1):
-a later `load_models` call is an error and leaves the loaded models alone (status `ALREADY_INITIALIZED`); a process that exits after `init` without `cleanup` must not
-crash; the toolchain writes `oaax-manifest.json` (draft schema PR in the OAAX repo, marked 2.1); the runtime reports model I/O in `runtime_get_info`; a state and status-code
-table, per-request failure reporting and the other open points of the 2.0 review. The reference runtime and toolchain findings behind this are filed as issues #45-#49 of
-the reference-implementation repository.
+Decided with the author while building the suite. 2.0 is frozen; these become requirements in 2.1, and the suite will move their tests from PROPOSED to MUST for 2.1:
+
+- a later `load_models` call is an error and leaves the loaded models alone (status `ALREADY_INITIALIZED`);
+- a process that exits after `init` without `cleanup` must not crash;
+- the toolchain writes `oaax-manifest.json` (draft schema PR in the OAAX repo, marked 2.1);
+- the runtime reports model I/O in `runtime_get_info`;
+- a state and status-code table, per-request failure reporting and the other open points of the 2.0 review.
+
+The reference runtime and toolchain findings behind this are filed as issues #45-#49 of the reference-implementation repository.
