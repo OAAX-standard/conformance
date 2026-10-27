@@ -3,6 +3,7 @@ import json
 
 from ..harness import status_name
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
+from .. import safefile
 from .runtime_lifecycle import MIN_CYCLES_FOR_GROWTH, _why_fewer
 
 SPEC_MODEL_CYCLES = 20  # what RT-M-35 is titled with
@@ -392,7 +393,7 @@ def _info_field(run, step: str, key: str):
     if raw is None:
         raise Fail(f"runtime_get_info() returned NULL ({step})")
     try:
-        return json.loads(raw.decode("utf-8")).get(key)
+        return safefile.parse_json(raw.decode("utf-8")).get(key)
     except (UnicodeDecodeError, ValueError, AttributeError):
         raise Fail(f"runtime_get_info() is not a JSON object ({step})")
 

@@ -43,8 +43,16 @@ def read_limited(path, limit: int = MAX_JSON_BYTES) -> bytes:
         os.close(fd)
 
 
+def parse_json(text):
+    """json.loads for text the program under test wrote: nesting deeper than the parser's recursion limit is invalid input (ValueError), never a crash of the suite."""
+    try:
+        return json.loads(text)
+    except RecursionError:
+        raise ValueError("nested too deeply to parse") from None
+
+
 def read_json(path, limit: int = MAX_JSON_BYTES):
-    return json.loads(read_limited(path, limit).decode("utf-8"))
+    return parse_json(read_limited(path, limit).decode("utf-8"))
 
 
 def model_too_big(path) -> str | None:

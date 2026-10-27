@@ -207,6 +207,9 @@ def main(argv: list[str]) -> int:
             os.mkfifo(target)
         elif fault("link_manifest"):  # a link to something endless
             os.symlink("/dev/zero", target)
+        elif fault("nested_manifest"):  # 200 KB of "[": under every size cap, over the recursion limit of a JSON parser
+            with open(target, "w") as f:
+                f.write("[" * 200000)
         else:
             with open(target, "w") as f:
                 json.dump(payload if payload is not None else tamper(doc, out), f)

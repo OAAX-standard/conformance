@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parent
 
 
 class HarnessHook(BuildHookInterface):
+    def finalize(self, version, build_data, artifact_path):
+        shutil.rmtree(getattr(self, "_workdir", None) or "/nonexistent", ignore_errors=True)  # every uv build used to leave one in /tmp
+
     def initialize(self, version, build_data):
         if self.target_name != "wheel":
             return
@@ -36,7 +39,8 @@ class HarnessHook(BuildHookInterface):
     def _compile(self) -> Path:
         if not sys.platform.startswith("linux") or not shutil.which("cmake"):  # the harness uses dlfcn and /proc
             raise OSError("needs Linux and cmake")
-        out = Path(tempfile.mkdtemp(prefix="oaax-harness-"))  # kept: hatch reads the file after this hook returns
+        out = Path(tempfile.mkdtemp(prefix="oaax-harness-"))  # hatch reads the file after this hook returns: removed in finalize()
+        self._workdir = out
         # -ffile-prefix-map: the same bytes whatever directory the build ran in
         flags = f"-ffile-prefix-map={ROOT}=."
         run = lambda *cmd: subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: E731

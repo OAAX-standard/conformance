@@ -371,7 +371,7 @@ def test_the_copy_of_an_output_directory_keeps_files_and_links_and_never_opens_a
         shutil.rmtree(first.root)
 
 
-@pytest.mark.parametrize("fault", ["fifo_manifest", "link_manifest", "huge_manifest"])
+@pytest.mark.parametrize("fault", ["fifo_manifest", "link_manifest", "huge_manifest", "nested_manifest"])
 def test_a_manifest_that_is_not_a_small_regular_file_never_hangs_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path, fault):
     """C8: a named pipe called oaax-manifest.json hung the whole suite in E2E (modelio read it for every scenario)."""
     import signal
@@ -674,3 +674,41 @@ def test_the_cleanup_container_runs_with_the_sandbox_and_still_removes_what_anot
     joined = " ".join(cleanup)
     assert "--cap-drop ALL" in joined and "--cap-add FOWNER" in joined and "--cap-add DAC_OVERRIDE" in joined
     assert "--security-opt no-new-privileges" in joined and "--pids-limit 4096" in joined and "--network none" in joined
+
+
+def test_a_deeply_nested_manifest_is_a_finding_not_a_crash(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """F1: 200 KB of "[" is far under the 10 MB cap but over the recursion limit of the JSON parser: seven checks ended in ERROR (exit 4, "a bug of the suite")."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "nested_manifest", tmp_path), ["TC-24", "TC-25", "E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    assert {i: r.outcome for i, r in results.items() if r.outcome == "error"} == {}
+    assert results["TC-24"].outcome in ("fail", "warn")  # the manifest is not valid, said as a finding
+
+
+def test_the_entry_cap_fires_while_listing_not_after_holding_the_whole_directory(tmp_path, monkeypatch):
+    """F3: walk() sorted the complete scandir listing before checking the cap (1.5M files: 419 MB and 6 s before TreeTooBig)."""
+    from oaax_conformance import toolchain
+
+    monkeypatch.setattr(toolchain, "MAX_TREE_ENTRIES", 50)
+    for i in range(200):
+        (tmp_path / f"f{i}").write_text("x")
+    seen = []
+    real_scandir = toolchain.os.scandir
+
+    class Counting:
+        def __init__(self, path):
+            self.inner = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.inner.close()
+
+        def __iter__(self):
+            for entry in self.inner:
+                seen.append(entry.name)
+                yield entry
+
+    monkeypatch.setattr(toolchain.os, "scandir", Counting)
+    with pytest.raises(toolchain.TreeTooBig):
+        list(toolchain.walk(tmp_path))
+    assert len(seen) <= 51  # stopped at the cap, did not read the other 150

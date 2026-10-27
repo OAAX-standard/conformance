@@ -122,3 +122,18 @@ except Blocked as e:
     print("BLOCKED", e)
 """, str(huge_model))
     assert "BLOCKED" in out and "GB" in out and peak < 1000, (out, peak)
+
+
+def test_json_nested_beyond_the_recursion_limit_is_a_value_error_not_a_crash(tmp_path):
+    """F1: RecursionError is a RuntimeError, so every `except ValueError` around a toolchain's or a runtime's JSON let it through."""
+    import pytest
+
+    from oaax_conformance import safefile
+
+    with pytest.raises(ValueError, match="nested too deeply"):
+        safefile.parse_json("[" * 200000)
+    path = tmp_path / "m.json"
+    path.write_text("[" * 200000)
+    with pytest.raises(ValueError):
+        safefile.read_json(path)
+    assert safefile.parse_json('{"a": [1, 2]}') == {"a": [1, 2]}
