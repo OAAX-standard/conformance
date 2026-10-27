@@ -70,14 +70,18 @@ def walk(root: Path):
     stack, count = [(root, 0)], 0
     while stack:
         directory, depth = stack.pop()
+        entries = []
         try:
-            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+            with os.scandir(directory) as listing:
+                for entry in listing:  # counted while listing: a directory with millions of files must not be held in memory before the cap fires
+                    count += 1
+                    if count > MAX_TREE_ENTRIES:
+                        raise TreeTooBig(f"has more than {MAX_TREE_ENTRIES} entries")
+                    entries.append(entry)
         except OSError:
             continue  # a directory we cannot list: the entry itself is reported, its content is not ours to judge
+        entries.sort(key=lambda e: e.name)
         for entry in entries:
-            count += 1
-            if count > MAX_TREE_ENTRIES:
-                raise TreeTooBig(f"has more than {MAX_TREE_ENTRIES} entries")
             try:
                 info = entry.stat(follow_symlinks=False)
             except OSError:

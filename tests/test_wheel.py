@@ -97,3 +97,28 @@ def test_model_at_tiny_conv_is_the_packaged_model(build_dir, monkeypatch):
     monkeypatch.setattr(cli, "_runtime", lambda args: seen.append(args.model) or 0)
     assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--model", "@tiny-conv"]) == 0
     assert seen == [toolchain.default_model()] and Path(seen[0]).is_file()
+
+
+def test_a_harness_that_is_not_executable_is_one_clear_line_not_an_internal_error(tmp_path, monkeypatch):
+    """F2: a packaged binary without the x bit, or --harness FILE that is not executable, ended in "internal error PermissionError" (exit 4)."""
+    import pytest
+
+    from oaax_conformance import harness
+
+    plain = tmp_path / "oaax-harness"
+    plain.write_text("#!/bin/sh\n")
+    plain.chmod(0o644)
+    with pytest.raises(FileNotFoundError, match="not executable"):
+        harness.find_harness(str(plain))
+    monkeypatch.delenv("OAAX_HARNESS", raising=False)
+    monkeypatch.setattr(harness, "packaged_harness", lambda: plain)
+    with pytest.raises(FileNotFoundError, match="not executable"):
+        harness.find_harness(None)
+    plain.chmod(0o755)
+    assert harness.find_harness(str(plain)) == str(plain.resolve())
+
+
+def test_the_build_hook_removes_its_temporary_directory():
+    """F4: every uv sync / uv build outside the release container left an `oaax-harness-*` directory in /tmp."""
+    text = (Path(__file__).resolve().parent.parent / "hatch_build.py").read_text()
+    assert "def finalize" in text and "rmtree" in text and "_workdir" in text

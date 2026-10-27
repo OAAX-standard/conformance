@@ -50,9 +50,13 @@ def find_harness(explicit: str | None = None) -> str:
         if path:
             if not Path(path).is_file():
                 raise FileNotFoundError(f"{source} {path}: no such file")
+            if not os.access(path, os.X_OK):
+                raise FileNotFoundError(f"{source} {path}: not executable (chmod +x it)")
             return str(Path(path).resolve())
     for candidate in (packaged_harness(), CHECKOUT_HARNESS):
         if candidate.is_file():
+            if not os.access(candidate, os.X_OK):
+                raise FileNotFoundError(f"{candidate}: the harness is not executable (a broken install: reinstall, or chmod +x it)")
             return str(candidate)
     raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: this install has none (a Linux wheel contains it; a macOS, Windows or source install "
                             "does not). Use the Linux wheel, or build it (scripts/build.sh) and pass --harness PATH or set OAAX_HARNESS")

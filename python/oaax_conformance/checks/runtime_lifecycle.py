@@ -4,6 +4,7 @@ from collections import Counter
 
 from ..harness import status_name
 from ..registry import Blocked, Fail, check
+from .. import safefile
 
 SUCCESS, ALREADY_INITIALIZED = 0, 3
 MAX_RSS_GROWTH = 5 * 1024 * 1024
@@ -49,7 +50,7 @@ def info_is_json(ctx):
     if raw is None:
         raise Fail("runtime_get_info() returned NULL after init")
     try:
-        info = json.loads(raw.decode("utf-8"))
+        info = safefile.parse_json(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
         raise Fail(f"runtime_get_info() is not valid JSON: {e}")
     if not isinstance(info, dict):
