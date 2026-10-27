@@ -575,3 +575,32 @@ def test_version_is_printed_and_comes_from_one_place(capsys):
     with pytest.raises(SystemExit) as stop:
         cli.main(["--version"])
     assert stop.value.code == 0 and f"oaax-conformance {__version__}" in capsys.readouterr().out
+
+
+# ---- round 5 ------------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("args", [["-e", "T=s3cretvalue"], ["-eT=s3cretvalue"], ["--env", "T=s3cretvalue"], ["--env=T=s3cretvalue"], ["-e", "T=s3cret=value"]])
+def test_every_docker_env_form_registers_its_bare_value_as_a_secret(args):
+    """A1: `--env=NAME=VALUE` registered "NAME=VALUE" as the secret, so the value alone leaked into every report."""
+    secrets = report.secret_values([], args)
+    value = args[-1].split("=", 2)[-1] if args[-1].startswith("--env=") else args[-1].split("=", 1)[1]
+    assert secrets == [value]
+    text = report.clean_text(f"failed: token={value} name={args[-1].split('=')[0]}", [], secrets)
+    assert value not in text and "token=***" in text
+
+
+def test_an_env_file_is_refused_because_its_values_cannot_be_kept_out_of_the_reports(capsys):
+    assert cli.main(["toolchain", "x", "--docker-arg=--env-file=/etc/hostname"]) == 3
+    assert "-e NAME=VALUE" in capsys.readouterr().err
+
+
+def test_text_that_xml_cannot_hold_is_escaped_so_junit_stays_parseable(tmp_path):
+    """A2: U+FFFE/U+FFFF and lone surrogates are valid in a Python string and in UTF-8 but not in XML 1.0, and a toolchain's last output line is quoted in a message."""
+    from dataclasses import asdict
+
+    nasty = "fatal: ￾￿ \ud800 \x9b[31m ‮ rest"
+    doc = {"spec_version": "2.0", "results": [asdict(report.Result("A", "t", "MUST", "s", "fail", nasty))]}
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), report.scrub(doc, [], []))
+    failure = ET.parse(path).getroot().find("testcase/failure")  # raises on malformed XML
+    assert failure.get("message") == "fatal: \\ufffe\\uffff \\ud800 \\x9b[31m \\u202e rest"

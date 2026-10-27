@@ -130,6 +130,8 @@ def _validate(args) -> str | None:
         if args.runtime and not Path(args.runtime).is_file():
             return f"--runtime {args.runtime}: no such library"
         for arg in args.docker_arg:
+            if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
+                return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
             if arg.split("=", 1)[0] in FORBIDDEN_DOCKER_ARGS:
                 return f"--docker-arg {arg}: the suite sets this itself (a value here would change what the tests test)"
     return None
