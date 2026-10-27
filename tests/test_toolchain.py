@@ -242,3 +242,22 @@ def test_no_toolchain_check_passes_when_every_conversion_stalls(build_dir, mock_
     results = _run(ctx)
     judged = {i: r.outcome for i, r in results.items() if not i.startswith(("TC-50", "TC-51", "TC-52")) and i != "TC-10" and r.outcome in ("pass", "fail", "warn", "error")}
     assert judged == {}
+
+
+def test_disk_use_does_not_grow_with_the_number_of_conversions(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """A7: every conversion had its own workspace until the end of the run (13x the model's size in the adversary's measurement); big files go as soon as
+    the conversion is done, so the peak stays near one model (the 'valid' one, which E2E loads) plus the conversions in flight."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "big_output", tmp_path, with_runtime=False)
+    peaks = []
+    real = ToolchainContext.convert
+
+    def measured(self, *args, **kwargs):
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            peaks.append(sum(f.stat().st_size for ws in self.workspaces for f in ws.root.rglob("*") if f.is_file() and not f.is_symlink()))
+
+    monkeypatch.setattr(ToolchainContext, "convert", measured)
+    results = _run(ctx, [i for i in CHECKS if i.startswith("TC-") and i not in ("TC-50", "TC-51", "TC-52")])
+    assert len(peaks) >= 12 and {r.outcome for r in results.values()} <= {"pass", "warn", "na", "blocked"}
+    assert max(peaks) < 4 * (8 << 20), f"peak {max(peaks) >> 20} MiB over {len(peaks)} conversions"

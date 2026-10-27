@@ -94,6 +94,23 @@ class Workspace:
         return path
 
 
+KEEP_BYTES = 1 << 20
+
+
+def _drop_big_files(directory: Path) -> None:
+    """Delete the big files (compiled models are GB) of a finished conversion so disk use does not grow with the number of conversions.
+    A file another uid created in a directory of its own cannot be removed here: close() opens those up and removes them at the end."""
+    try:
+        for path in directory.rglob("*"):
+            try:
+                if path.name not in (*LOG_NAMES, MANIFEST) and path.is_file() and not path.is_symlink() and path.stat().st_size > KEEP_BYTES:
+                    path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 @dataclass
 class Conversion:
     """One `docker run` of the toolchain and what it left behind."""
@@ -277,6 +294,10 @@ class ToolchainContext:
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
                          _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+        # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
+        _drop_big_files(ws.in_dir)
+        if name != "valid" and workspace is None:
+            _drop_big_files(ws.out_dir)
         if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
             self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"
             raise Blocked(self.timeouts[name])

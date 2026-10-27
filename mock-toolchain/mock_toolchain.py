@@ -150,6 +150,9 @@ def main(argv: list[str]) -> int:
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("big_output"):  # a compiled model is big: a sparse 8 MiB file stands for it
+        with open(os.path.join(out, "weights.bin"), "wb") as f:
+            f.truncate(8 << 20)
     if fault("subdirs"):  # subdirectories created as the uid the container runs as
         os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
         open(os.path.join(out, "sub", "deep", "file"), "w").close()
