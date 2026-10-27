@@ -109,6 +109,9 @@ def main(argv: list[str]) -> int:
         print("usage: mock_toolchain.py <input> <output-directory>")
         return 2
     path, out = argv[0], argv[-1]
+    if fault("echo_token"):  # prints the TOKEN variable so that the last 3000 characters begin in the middle of it (padding after it)
+        # 4000 + 14 + 2984 + newline + the 10 characters of "converted\n" printed at the end = 7009: the last 3000 start 5 characters before the end of a 14-character TOKEN
+        print("A" * 4000 + os.environ.get("TOKEN", "") + "B" * 2984, flush=True)
     if fault("fail_always"):
         return fail(out, "failing on purpose")
     if fault("hang"):

@@ -18,7 +18,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .harness import TailCapture, uninterruptible
+from .harness import TailCapture, hide_secrets, uninterruptible
 from .registry import Blocked
 
 DOCKER_ERROR = 125  # `docker run` exit code for its own failures (not the container's)
@@ -235,6 +235,11 @@ class ToolchainContext:
     model_file: str | None = None  # --model-file: which output file is the model
     candidates: list = field(default_factory=list)  # the output files that were tried as the model (E2E)
 
+    def _secrets(self) -> list[str]:
+        from .report import secret_values
+
+        return secret_values(self.init_config, self.docker_args)
+
     def runtime_context(self, model_path: str):
         """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""
         from .suite import Context
@@ -324,8 +329,9 @@ class ToolchainContext:
             changes = [line[2:] for line in diff.splitlines() if line[:2] in ("A ", "C ")]
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
-        run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
-                         _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+        secrets = self._secrets()  # scrubbed here, before any check cuts the text (to 200 characters, to its last 3000): a cut must never leave half of a secret
+        run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(hide_secrets(out.decode(errors="replace"), secrets), ws),
+                         _redact(hide_secrets(err.decode(errors="replace"), secrets), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
         # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
         _drop_big_files(ws.in_dir)
         if name != "valid" and workspace is None:

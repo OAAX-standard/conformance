@@ -427,3 +427,30 @@ def test_every_dump_directory_of_every_candidate_is_removed_at_close(build_dir, 
     assert len(dumps) == 3 and all(os.path.isdir(d) for d in dumps)
     ctx.close()
     assert not [d for d in dumps if os.path.exists(d)]
+
+
+def test_a_secret_cut_by_the_tail_never_shows_half_of_it(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C7: the last 3000 characters of the console were cut BEFORE the secrets were removed, so a secret straddling the cut left its tail in report.json."""
+    token = "s3cretvalue123"
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "echo_token", tmp_path)
+    ctx.docker_args += ["-e", f"TOKEN={token}"]
+    _run(ctx, ["TC-01"])
+    obs = ctx._runs["valid"].observations()[0]  # the command line is masked later, in the report; what the toolchain printed must already be clean
+    shown = obs.get("stdout_tail", "") + obs.get("stderr_tail", "")
+    assert shown.count("B") > 2000 and token not in shown and len(shown) <= 3000
+    assert all(token[-n:] not in shown for n in range(3, len(token) + 1)), shown[:60]  # not even its last 3 characters
+
+
+def test_a_runtime_secret_cut_by_the_tail_never_shows_half_of_it(tmp_path):
+    import os
+    import stat
+
+    from oaax_conformance.harness import TAIL, run_scenario
+
+    token = "s3cretvalue123"
+    script = tmp_path / "fake-harness"
+    script.write_text(f"#!/usr/bin/env python3\nprint('A' * 5000 + '{token}' + 'B' * {TAIL - 5})\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    run = run_scenario(str(script), "static", "libx.so", [f"key={token}"], timeout=10)
+    assert token not in run.stdout_tail and all(token[-n:] not in run.stdout_tail for n in range(3, len(token) + 1)), run.stdout_tail[:60]
+    assert len(run.stdout_tail) <= TAIL
