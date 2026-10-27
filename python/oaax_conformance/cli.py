@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import __version__, html_report, report
-from .dockerargs import unparseable, uses
+from .dockerargs import foreground_problem, unparseable, uses
 from .harness import find_harness
 from .libcheck import library_problem
 from .modelio import NoModelIO, check_inputs, parse_arg
@@ -141,12 +141,17 @@ def _validate(args) -> str | None:
         if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
             return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
         # One reader (dockerargs) for this and for the masking of secrets: every spelling docker accepts (-u0, -tu, -v/x:/y, --user=0, --user 0).
+        # A refusal is printed to the terminal and may be pasted into a ticket: an argument that carries an environment value is shown masked (`-dteTOKEN=***`), and a
+        # cluster the reader cannot parse only by its flag letters.
+        shown = lambda arg: report.mask_docker_args([arg])[0]  # noqa: E731
         if unclear := unparseable(args.docker_arg):
             return f"--docker-arg {unclear}: cannot tell which docker options this cluster of short flags is; spell each one separately (-e NAME=VALUE, -i, -t)"
         if env_file := uses(args.docker_arg, ("--env-file",)):  # its values cannot be known, so they could not be kept out of the reports
-            return f"--docker-arg {env_file}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
+            return f"--docker-arg {shown(env_file)}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
+        if broken := foreground_problem(args.docker_arg, shown):
+            return f"--docker-arg {broken}"
         if forced := uses(args.docker_arg, FORBIDDEN_DOCKER_ARGS):
-            return f"--docker-arg {forced}: the suite sets this itself (a value here would change what the tests test)"
+            return f"--docker-arg {shown(forced)}: the suite sets this itself (a value here would change what the tests test)"
     return None
 
 
@@ -215,6 +220,13 @@ def _runtime(args) -> int:
 def _toolchain(args) -> int:
     from .toolchain import ToolchainContext, default_model, docker_available
 
+    if args.runtime:  # the same one-line exit 3 as `runtime LIB` (the header check ran in _validate; this asks dlopen): before any test, not as BLOCKED rows after the conversions
+        try:
+            probe = Context(str(Path(args.runtime).resolve()), find_harness(args.harness), args.init_config, None, [], 60, progress=False)
+        except FileNotFoundError as e:
+            return usage_error(str(e))
+        if problem := _not_a_library(probe):
+            return usage_error(problem)
     if not docker_available():
         return usage_error("Docker is not available: a toolchain is a Docker image, so the toolchain tests need `docker` on this machine")
     try:
@@ -257,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     problem = _validate(args)
     if problem:
         return usage_error(problem)
+    if names := report.short_secret_names(args.init_config, getattr(args, "docker_arg", [])):  # the floor of the masking is documented; say it when it applies
+        print(f"note: the value{'s' if len(names) > 1 else ''} of {', '.join(names)} {'are' if len(names) > 1 else 'is'} too short to be hidden in reports "
+              f"(values under {report.MIN_SECRET} characters are not masked)", file=sys.stderr)
     main_thread = threading.current_thread() is threading.main_thread()
     # `nohup oaax-conformance ...` ignores SIGHUP on purpose: keep it ignored
     caught = [signal.SIGTERM] + ([] if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else [signal.SIGHUP])

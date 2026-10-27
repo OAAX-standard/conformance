@@ -18,7 +18,7 @@ All of them are in `--help`.
 | ------ | ------------ |
 | `--out DIR` | write `report.html`, `report.json` and `junit.xml` |
 | `--init-config key=value` | a vendor key for the runtime's `init` (repeatable); never stored in reports |
-| `--timeout SEC` | per scenario, default 300. Loops stop at 60 % of it; a call still running at the limit is `BLOCKED`, not failed |
+| `--timeout SEC` | runtime: per scenario, default 300; toolchain: per conversion, default 900 (the first valid conversion hanging blocks the others). Loops stop at 60 % of it; a call still running at the limit is `BLOCKED`, not failed |
 | `--round-trip-timeout SEC` | also for slow devices (see `--help`) |
 | `--skip ID` | leave a test out (a skipped MUST makes the run `INCOMPLETE`, exit 2) |
 | `--only ID` | run only these tests. The console says "Only N of M approved checks were selected"; JSON records it as `summary.checks_selected` and JUnit as the `checks_selected` property. The exit code covers only the checks that ran |
@@ -62,12 +62,16 @@ The two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and 
 - **Shown as given**: other docker flags (`--label`, `--add-host`...), so keep secrets out of them.
 - **Refused**: `--env-file` (its values cannot be kept out of the reports), and a cluster of short flags the suite cannot read with certainty (exit 3).
 - Secrets are removed before a text is cut to its tail, never after.
+- **Values shorter than 3 characters are not masked** (`--init-config pin=42`, `-e A=1`): a one-character value would turn every such character of every message into `***`. The suite says so at the start ("note: the value of pin is too short to be hidden in reports"). Give a secret a longer value, or keep it out of the options.
+- A refusal message never echoes an environment value: an argument that carries one is printed masked (`-dteTOKEN=***`), a cluster the reader cannot parse only by its flag letters.
 
 ## `--docker-arg` rules
 
 The suite sets some flags itself, so a value from you would change what the tests test. These are refused, in every spelling (`-u0`, `-tu 0`, `-v/x:/y`, `--user=0`):
 
 `--user`/`-u`, `-v`/`--volume`/`--mount`, `--network`/`--net`, `--entrypoint`, `--read-only`, `--privileged`, `--rm`, `--name`.
+
+Flags that change how a foreground `docker run` behaves are refused too (exit 3, one line), because they gave false MUST FAILs: `-d`/`--detach` (docker returns the container id at once and the suite would read `/output` while the toolchain still runs), `-a`/`--attach`, `--restart` (docker: "conflicting options: cannot specify both --restart and --rm"), `--cidfile` (the second of the ~30 conversions fails with "container ID file found"), and `-i`/`--interactive` together with `-t`/`--tty` ("cannot attach stdin to a TTY-enabled container": the suite's stdin is `/dev/null`; either one alone is fine, and `-dit` clusters are read like `-d -i -t`). `--tmpfs`, `--init`, `--stop-signal` and `--sig-proxy` are accepted: docker runs fine with them.
 
 The suite's own defaults on every conversion are `--cap-drop ALL`, `--security-opt no-new-privileges` and a process limit; `--docker-arg` may override those (a toolchain that needs a capability is worth reporting to its vendor).
 
@@ -96,8 +100,8 @@ All four end-to-end tests judge the same file.
 - Each conversion works in a temporary directory under `$TMPDIR`: point it at a disk with room. A `TMPDIR` containing `:` is refused (docker cannot mount it).
 - The big files of a conversion are deleted as soon as it is done, except those of the first valid conversion (the end-to-end tests load it). Plan for about two to three times the size of your model.
 - The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB).
-- Files a toolchain writes are read only when they are regular files, never through a link, and no more than 10 MB for logs and manifests.
+- Files a toolchain writes are never opened through a link and never opened at all unless they are regular files (a pipe or a device is skipped). Logs and manifests are read only up to 10 MB. A model is never read into memory above 2 GiB (the suite asks for `--input` instead). A file above 512 MiB is not hashed (size and modification time are compared). Output trees deeper than 100 levels or with more than 100 000 entries are not inspected (BLOCKED). The runtime under test gets the model's path and reads it itself.
 
 ### Cleanup
 
-If the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them. An image without `chmod` leaves the directory, and the suite lists it.
+If the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root, with `--network none`, `--cap-drop ALL` plus the two capabilities `chmod` needs (`FOWNER`, `DAC_OVERRIDE`), `no-new-privileges` and a process limit, mounting only that workspace, to `chmod` them. An image without `chmod` leaves the directory, and the suite lists it.

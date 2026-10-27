@@ -6,8 +6,8 @@ from pathlib import Path
 from .. import manifest
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
-from ..safefile import MAX_JSON_BYTES, read_json
-from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, Workspace, follows_naming, make_hostile_zip
+from ..safefile import MAX_JSON_BYTES, model_too_big, read_json
+from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, TreeTooBig, Workspace, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
 
@@ -77,7 +77,7 @@ def output_directory_may_exist(ctx):
     _succeeded(first, "the first conversion")
     try:
         copy = Workspace.with_output_of(first.workspace)
-    except OSError as e:
+    except (OSError, RecursionError, TreeTooBig) as e:
         raise Blocked(f"cannot copy the output of the first conversion to test a second one: {e}")
     _succeeded(ctx.convert("again", workspace=copy), "a second conversion into the same output directory")
 
@@ -162,13 +162,26 @@ def readable_outputs(ctx):
         raise Fail("not readable by the user who started the container: " + ", ".join(unreadable[:5]))
 
 
-def _manifest_doc(run):
+def _manifest_raw(run):
+    """The manifest as the toolchain wrote it (any JSON value), None when there is none. Only TC-24 judges what is in it."""
     if MANIFEST not in run.files():
         return None
     try:
         return _read_json(run, MANIFEST)
     except (OSError, ValueError) as e:
         raise Fail(f"{MANIFEST} is not valid JSON: {e}")
+
+
+def _manifest_doc(run):
+    """The manifest if it is a usable one: a JSON object that the schema accepts. A list, a string, a number, an object without `inputs` is not: TC-24 reports it
+    and every other check goes on as if there were no manifest, never with a crash (what a toolchain writes is never a bug of the suite)."""
+    try:
+        doc = _manifest_raw(run)
+    except (Fail, Warn):  # not JSON, too big: TC-24 says so
+        return None
+    if not isinstance(doc, dict) or manifest.validate(doc, str(run.result_dir)):
+        return None
+    return doc
 
 
 @check("TC-23")
@@ -182,7 +195,7 @@ def bundle_manifest(ctx):
 @check("TC-24")
 def manifest_is_valid(ctx):
     run = _valid(ctx)
-    doc = _manifest_doc(run)
+    doc = _manifest_raw(run)
     if doc is None:
         raise NotApplicable("no manifest (see TC-23)")
     problems = manifest.validate(doc, str(run.result_dir))
@@ -195,7 +208,7 @@ def manifest_matches_the_model(ctx):
     run = _valid(ctx)
     doc = _manifest_doc(run)
     if doc is None:
-        raise NotApplicable("no manifest (see TC-23)")
+        raise NotApplicable("no usable manifest (see TC-23 and TC-24)")
     try:
         original = manifest.derive_io(ctx.onnx_path)
     except ImportError:
@@ -353,7 +366,9 @@ def _converted(ctx):
     if ctx._picked is None:
         ctx._picked = _pick_model(ctx, run)
     rctx, path, why = ctx._picked
-    ctx.notes.append(f"the end-to-end tests judge the output file {Path(path).name} ({why})")
+    note = f"the end-to-end tests judge the output file {Path(path).name} ({why})"
+    if note not in ctx.notes:  # a check may ask for the converted model more than once
+        ctx.notes.append(note)
     return rctx, path
 
 
@@ -421,15 +436,28 @@ def _io_views(model_path: str, doc: dict | None):
             return None  # outputs without an onnx view: the manifest says the model is not equivalent (checked by the caller)
         return [{t["name"]: (t["onnx"]["dtype"], tuple(t["onnx"]["shape"])) for t in doc[k]} for k in ("inputs", "outputs")]
     if Path(model_path).suffix == ".onnx":
+        if too_big := model_too_big(model_path):  # written by the toolchain: never read a file of this size into memory
+            raise Blocked(too_big)
         io = manifest.derive_io(model_path)
         return [{t["name"]: (t["onnx"]["dtype"], tuple(t["onnx"]["shape"])) for t in io[k]} for k in ("inputs", "outputs")]
     return None
 
 
+def _manifest_of(ctx, path):
+    """(the usable manifest, why it does not apply): it applies to the judged file only when it names it. A manifest that describes another file says nothing about
+    this one (E2E-02 and E2E-04 already ignore it through modelio), so no check may take its inputs, outputs or `equivalent` for this file's."""
+    doc = _manifest_doc(_valid(ctx))
+    if doc and doc.get("model_file") != Path(path).name:
+        return None, f"the manifest describes {doc.get('model_file')}, not {Path(path).name}: it cannot say what the judged file takes and returns"
+    return doc, None
+
+
 @check("E2E-03")
 def io_is_retained(ctx):
     _, path = _converted(ctx)
-    doc = _manifest_doc(_valid(ctx))
+    doc, elsewhere = _manifest_of(ctx, path)
+    if elsewhere:
+        raise Blocked(elsewhere)
     if doc and doc.get("equivalent") is False:
         raise Fail("the manifest declares equivalent: false: the runtime does not return the original model's outputs "
                    f"(it returns {', '.join(t['name'] for t in doc['outputs'])}); the spec requires the names and shapes to be retained")
@@ -461,7 +489,8 @@ def same_results(ctx):
                       "the e2e extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]'` with the wheel")
     from ..reference import deterministic_input
 
-    doc = _manifest_doc(_valid(ctx))
+    _, judged = _converted(ctx)
+    doc, _ = _manifest_of(ctx, judged)  # a manifest of another file does not tell whether THIS file's outputs are the original's
     if doc and doc.get("equivalent") is False:
         raise NotApplicable("the manifest declares equivalent: false: the outputs are not the original's, so there is nothing to compare")
     rctx, path, run, answered = _runtime_run(ctx, "roundtrip")

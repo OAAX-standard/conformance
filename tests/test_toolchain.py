@@ -489,3 +489,188 @@ def test_the_copy_of_an_output_directory_does_not_copy_big_files(tmp_path):
             shutil.rmtree(copy.root)
     finally:
         shutil.rmtree(first.root)
+
+
+# ---- round 7 ---------------------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fault", ["manifest_list", "manifest_string", "manifest_number", "manifest_no_inputs"])
+def test_a_manifest_that_is_not_a_usable_object_never_crashes_a_check(build_dir, mock_io_onnx, toolchain_images, tmp_path, fault):
+    """D1: valid JSON that is no object (`[1]`, `"x"`, `7`) or lacks `inputs` made TC-25 and E2E-01..04 ERROR (exit 4, "a bug of the suite") on what a toolchain wrote."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, fault, tmp_path), ["TC-24", "TC-25", "E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    assert [(i, r.message) for i, r in results.items() if r.outcome == "error"] == []
+    assert results["TC-24"].outcome in ("warn", "fail") and results["TC-24"].message  # said once, where it belongs
+    assert results["TC-25"].outcome == "na"
+    assert results["E2E-01"].outcome == "pass"  # the file is judged without the manifest
+
+
+def test_a_huge_model_never_makes_the_suite_read_it_into_memory(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D3, end to end: a toolchain that writes a sparse 3 GiB `model.onnx` and no manifest."""
+    import subprocess
+    import sys
+
+    code = ("import resource, sys\nfrom oaax_conformance import cli\nrc = cli.main(sys.argv[1:])\n"
+            "print('MAXRSS_MB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)\nsys.exit(rc)")
+    argv = ["toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=huge_model", "--runtime", str(build_dir / "libmock_runtime.so"), "--harness",
+            str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1", "--only", "E2E-01", "--only", "E2E-04", "--quiet"]
+    done = subprocess.run([sys.executable, "-c", code, *argv], capture_output=True, text=True, timeout=600)
+    peak = int(done.stdout.rsplit("MAXRSS_MB", 1)[1])
+    assert "E2E-04" in done.stdout and "ERROR" not in done.stdout.split("Details")[-1].split("Result")[0], done.stdout[-1500:]
+    assert "GB: the suite does not read a model that big" in done.stdout.replace("\n", " ") or "GB" in done.stdout
+    assert peak < 1500, f"peak memory {peak} MB"
+
+# ---- round 7 (D4): a failed or impossible copy leaves nothing behind, a deep or huge output tree is a clean BLOCKED ------------------------------
+
+def _deep_tree(root, levels):
+    import os
+
+    here = os.getcwd()
+    os.chdir(root)
+    try:
+        for _ in range(levels):
+            os.mkdir("d")
+            os.chdir("d")
+    finally:
+        os.chdir(here)
+
+
+@pytest.fixture
+def private_tmp(tmp_path, monkeypatch):
+    """tempfile creates the suite's workspaces here: what is left over after a run is visible (other tests running in parallel cannot interfere)."""
+    import tempfile
+
+    base = tmp_path / "tmp"
+    base.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(base))
+    return base
+
+
+def test_an_unreadable_file_blocks_tc08_and_leaves_no_workspace_behind(build_dir, mock_io_onnx, toolchain_images, tmp_path, private_tmp):
+    """D4: Workspace.with_output_of() created the copy, failed on a mode-000 file, and nobody ever removed it (it was registered with the context only in convert())."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "unreadable_file", tmp_path), ["TC-01", "TC-08"])
+    assert results["TC-01"].outcome == "pass"
+    assert results["TC-08"].outcome == "blocked" and "cannot copy" in results["TC-08"].message
+    assert sorted(p.name for p in private_tmp.iterdir()) == []
+
+
+def test_a_tree_of_1700_levels_is_a_clean_block_and_leaves_nothing_behind(build_dir, mock_io_onnx, toolchain_images, tmp_path, private_tmp):
+    """D4: TC-08's recursive copy raised RecursionError (ERROR, exit 4, "a bug of the suite") and the half-copied tree stayed."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "deep_tree", tmp_path), ["TC-01", "TC-08"])
+    assert [(i, r.message) for i, r in results.items() if r.outcome == "error"] == []
+    assert results["TC-01"].outcome == "blocked" and "deeper than 100 levels" in results["TC-01"].message
+    assert sorted(p.name for p in private_tmp.iterdir()) == []
+
+
+def test_the_walkers_are_iterative_and_capped(tmp_path):
+    from oaax_conformance import toolchain
+    from oaax_conformance.toolchain import TreeTooBig, Workspace, remove_tree, tree
+
+    ws = Workspace.create()
+    try:
+        _deep_tree(ws.out_dir, 1700)
+        with pytest.raises(TreeTooBig, match="deeper than 100 levels"):
+            tree(ws.out_dir)
+        toolchain._drop_big_files(ws.out_dir)  # best effort, never an exception
+        with pytest.raises(TreeTooBig):
+            Workspace.with_output_of(ws)
+    finally:
+        remove_tree(ws.root)  # 1700 levels, without recursion
+    assert not ws.root.exists()
+
+
+def test_a_normal_deep_tree_is_copied_and_the_entry_cap_applies(tmp_path, monkeypatch):
+    from oaax_conformance import toolchain
+    from oaax_conformance.toolchain import TreeTooBig, Workspace, remove_tree, tree
+
+    ws = Workspace.create()
+    try:
+        _deep_tree(ws.out_dir, 90)
+        (ws.out_dir / "a.json").write_text("{}")
+        copy = Workspace.with_output_of(ws)
+        try:
+            assert set(tree(copy.out_dir)) == set(tree(ws.out_dir)) and len(tree(copy.out_dir)) == 91
+        finally:
+            remove_tree(copy.root)
+        monkeypatch.setattr(toolchain, "MAX_TREE_ENTRIES", 50)
+        with pytest.raises(TreeTooBig, match="more than 50 entries"):
+            tree(ws.out_dir)
+    finally:
+        remove_tree(ws.root)
+
+
+def test_e2e_03_does_not_take_the_manifest_of_another_file_for_the_judged_ones_io(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D5: with --model-file a-copy.bin the manifest (which names model.bin) was used for E2E-03 while E2E-02/04 correctly ignored it: a MUST PASSED on I/O it never read."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path)
+    ctx.model_file = "a-copy.bin"
+    results = _run(ctx, ["E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    assert results["E2E-01"].outcome == "pass"
+    assert results["E2E-03"].outcome == "blocked" and "the manifest describes model.bin, not a-copy.bin" in results["E2E-03"].message
+    assert results["E2E-02"].outcome == "blocked" and results["E2E-04"].outcome == "blocked"  # the same file judged by all four, with the same information
+    for r in results.values():
+        assert "a-copy.bin" in r.note
+
+
+def test_a_manifest_that_names_the_judged_file_still_counts(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, None, tmp_path), ["E2E-03"])
+    assert results["E2E-03"].outcome == "pass"
+
+
+# ---- round 7 (D3 addendum, D2) ------------------------------------------------------------------------------------------------------------------
+
+def test_big_files_are_not_hashed_and_a_change_is_still_seen(tmp_path):
+    """D3 addendum: tree() hashed every regular file: a sparse 16 GiB file cost 31 s, for each of ~15 conversions per run. Above 512 MiB size and mtime stand in."""
+    import os
+    import time
+
+    from oaax_conformance.toolchain import HASH_LIMIT, tree
+
+    with open(tmp_path / "big.bin", "wb") as f:
+        f.truncate(8 << 30)  # sparse: 8 GiB that hashing would read whole (about 15 s)
+    (tmp_path / "small.json").write_text("{}")
+    started = time.monotonic()
+    first = tree(tmp_path)
+    assert time.monotonic() - started < 5, "the sparse file was hashed"
+    assert first["big.bin"]["sha256"] is None and first["big.bin"]["size"] > HASH_LIMIT and "mtime_ns" in first["big.bin"]
+    assert len(first["small.json"]["sha256"]) == 64 and "mtime_ns" not in first["small.json"]
+    os.utime(tmp_path / "big.bin", ns=(1, 1))
+    assert tree(tmp_path)["big.bin"] != first["big.bin"]  # touched: input_changes() compares these dicts
+    with open(tmp_path / "big.bin", "ab") as f:
+        f.truncate(9 << 30)
+    assert tree(tmp_path)["big.bin"]["size"] == 9 << 30
+
+
+def test_a_manifest_that_names_a_link_is_not_valid_and_the_end_to_end_tests_agree(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D2: validate() followed the link (TC-24 PASS) while the suite's listing does not: E2E ignored the manifest and judged another file."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "manifest_names_link", tmp_path), ["TC-24", "E2E-01", "E2E-02", "E2E-03"])
+    assert results["TC-24"].outcome in ("warn", "fail") and "model.lnk" in results["TC-24"].message and "a link" in results["TC-24"].message
+    assert results["E2E-01"].outcome == "pass"
+    assert [i for i, r in results.items() if r.outcome == "error"] == []
+    assert "(the only file)" in results["E2E-01"].note  # the unusable manifest is not used to choose, nor to describe, the file
+    assert results["E2E-03"].outcome != "pass"  # not judged against a manifest that does not describe the judged file
+
+
+# ---- round 7 (D9): the cleanup container keeps the sandbox ----------------------------------------------------------------------------------
+
+def test_the_cleanup_container_runs_with_the_sandbox_and_still_removes_what_another_uid_made(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """D9: the container that opens up undeletable output ran as root WITHOUT the flags the README says every run has."""
+    import os
+    import subprocess
+
+    from oaax_conformance.toolchain import Workspace
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    ws = Workspace.create()
+    ctx.workspaces.append(ws)
+    made = subprocess.run(["docker", "run", "--rm", "--user", "12345:12345", "-v", f"{ws.out_dir}:/out", "--entrypoint", "sh", CLEAN, "-c",
+                           "mkdir -m 700 /out/sub && mkdir -m 000 /out/sub/locked && touch /out/sub/f && chmod 000 /out/sub/f && chmod 500 /out/sub"],
+                          capture_output=True, text=True)
+    assert made.returncode == 0, made.stderr
+    assert (ws.out_dir / "sub").exists() and not os.access(ws.out_dir / "sub", os.W_OK)  # the host user cannot remove it
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **k: (seen.append(list(cmd)), real(cmd, *a, **k))[1])
+    ctx.close()
+    assert not ws.root.exists() and ctx.leftovers == []  # removed, with only FOWNER and DAC_OVERRIDE
+    cleanup = next(c for c in seen if "--entrypoint" in c and "chmod" in c)
+    joined = " ".join(cleanup)
+    assert "--cap-drop ALL" in joined and "--cap-add FOWNER" in joined and "--cap-add DAC_OVERRIDE" in joined
+    assert "--security-opt no-new-privileges" in joined and "--pids-limit 4096" in joined and "--network none" in joined

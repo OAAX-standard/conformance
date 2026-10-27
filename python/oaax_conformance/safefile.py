@@ -9,6 +9,7 @@ import stat
 from pathlib import Path
 
 MAX_JSON_BYTES = 10 << 20
+MAX_MODEL_BYTES = 2 << 30  # the protobuf limit of an ONNX file: a bigger "model" is not one we can parse, and reading it whole could exhaust the memory of the testing host
 
 
 class Unreadable(OSError):
@@ -44,3 +45,14 @@ def read_limited(path, limit: int = MAX_JSON_BYTES) -> bytes:
 
 def read_json(path, limit: int = MAX_JSON_BYTES):
     return json.loads(read_limited(path, limit).decode("utf-8"))
+
+
+def model_too_big(path) -> str | None:
+    """Why a model file must not be handed to onnx (which reads the whole file into memory), or None. Stat only: nothing is read."""
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return None  # the caller's own error handling tells what is wrong with it
+    if size > MAX_MODEL_BYTES:
+        return f"{Path(path).name} is {size / 1e9:.1f} GB: the suite does not read a model that big into memory; pass --input NAME:DTYPE:DIMS to describe it"
+    return None

@@ -96,7 +96,10 @@ def describe(data: bytes, out: str) -> dict | None:
         os.remove(path)
 
 
-def tamper(doc: dict) -> dict:
+def tamper(doc: dict, out: str) -> dict:
+    if fault("manifest_names_link"):  # model_file is a link to the model: validate() followed it, the suite's listing does not
+        os.symlink("model.bin", os.path.join(out, "model.lnk"))
+        doc["model_file"] = "model.lnk"
     if fault("manifest_invalid"):
         doc["inputs"][0]["native"]["dtype"] = "STRING"
     if fault("manifest_wrong_names"):
@@ -160,10 +163,12 @@ def main(argv: list[str]) -> int:
         return 0 if fault("unwritable_ok") else fail(out, f"cannot create the output directory: {e}")
     if fault("writes_input_dir"):
         open(path + ".cache", "w").close()
-    model_name = model_name_override or ("model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
+    model_name = model_name_override or ("model.onnx" if fault("huge_model") else "model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+            if fault("huge_model"):  # sparse: no disk is used, but onnx.load would read 3 GiB
+                f.truncate(3 << 30)
     if fault("two_models"):  # a second file the runtime also loads, sorting before model.bin
         with open(os.path.join(out, "a-copy.bin"), "wb") as f:
             f.write(b"MOCKMODEL" + data)
@@ -173,24 +178,38 @@ def main(argv: list[str]) -> int:
     if fault("big_output"):  # a compiled model is big: a sparse 8 MiB file stands for it
         with open(os.path.join(out, "weights.bin"), "wb") as f:
             f.truncate(8 << 20)
+    if fault("unreadable_file"):  # a mode-000 file next to the model, owned by the uid that runs the suite
+        secret = os.path.join(out, "secret.dat")
+        open(secret, "w").write("x")
+        os.chmod(secret, 0)
+    if fault("deep_tree"):  # ~1700 nested directories: a host path of ~3.5 kB (below PATH_MAX) and far above any recursion limit
+        here = os.getcwd()
+        os.chdir(out)
+        for _ in range(1700):
+            os.mkdir("d")
+            os.chdir("d")
+        os.chdir(here)
     if fault("subdirs"):  # subdirectories created as the uid the container runs as
         os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
         open(os.path.join(out, "sub", "deep", "file"), "w").close()
     write_log(out, True, "converted")
-    io = None if fault("no_manifest") or fault("vendor_format") else describe(data, out)
+    io = None if fault("no_manifest") or fault("vendor_format") or fault("huge_model") else describe(data, out)
     if io:
         doc = {"schema": "oaax-manifest/1", "oaax_version": "2.1", "model_file": "model.bin", "precision": "FP32", "equivalent": True, **io}
         if fault("raw_heads"):  # the runtime returns something else than the ONNX outputs: declared honestly
             doc["equivalent"] = False
             doc["outputs"] = [{"name": "head0", "native": {"dtype": "FLOAT", "shape": [1, 8], "layout": "XX"}}]
         target = os.path.join(out, "oaax-manifest.json")
+        payload = next((v for f, v in (("manifest_list", [1]), ("manifest_string", "x"), ("manifest_number", 7)) if fault(f)), None)  # valid JSON that is no object
+        if fault("manifest_no_inputs"):
+            del doc["inputs"]
         if fault("fifo_manifest"):  # a named pipe where the manifest should be: whoever opens it blocks forever
             os.mkfifo(target)
         elif fault("link_manifest"):  # a link to something endless
             os.symlink("/dev/zero", target)
         else:
             with open(target, "w") as f:
-                json.dump(tamper(doc), f)
+                json.dump(payload if payload is not None else tamper(doc, out), f)
                 if fault("huge_manifest"):  # sparse: no disk is used
                     f.truncate(40 << 20)
     if fault("no_perm"):
