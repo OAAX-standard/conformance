@@ -28,6 +28,9 @@ path = "python/oaax_conformance/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["python/oaax_conformance"]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+# hatch_build.py compiles the C harness into the wheel (see docs/design.md, Distribution)
+
 [tool.hatch.build.targets.wheel.force-include]
 "docs/tests" = "oaax_conformance/test_specs"
 

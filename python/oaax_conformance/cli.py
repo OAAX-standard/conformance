@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     rt = sub.add_parser("runtime", help="check a runtime library (.so)")
     rt.add_argument("library")
     _add_common(rt)
-    rt.add_argument("--model", metavar="FILE", help="a model file this runtime can load: enables the tests that need one")
+    rt.add_argument("--model", metavar="FILE", help="a model file this runtime can load: enables the tests that need one (@tiny-conv: the small model the suite ships)")
     rt.add_argument("--input", action="append", default=[], metavar="NAME:DTYPE:DIMS", help="an input of the model (repeatable), when it cannot be read from an "
                     "oaax-manifest.json or an .onnx file, or when the runtime takes another data type or layout than the ONNX model; use ? for a dynamic dimension")
     rt.add_argument("--hardware-safe", action="store_true", help="gentle on shared or fragile devices: few cycles, small floods, a pause between scenarios, "
@@ -266,6 +266,10 @@ def _terminate(signum, frame):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "model", None) == "@tiny-conv":  # the packaged model, wherever the package is installed
+        from .toolchain import default_model
+
+        args.model = default_model()
     problem = _validate(args)
     if problem:
         return usage_error(problem)
