@@ -68,3 +68,57 @@ def test_the_manifest_next_to_a_model_never_hangs_or_exhausts_memory(tmp_path, m
             f.truncate(3 << 30)
     with pytest.raises(modelio.NoModelIO, match="manifest next to it cannot be used"):
         modelio.discover(str(model), [])
+
+
+def test_a_manifest_that_is_valid_json_but_no_object_is_not_this_models_manifest(tmp_path):
+    """D1: modelio caught (ValueError, KeyError, TypeError) but not the AttributeError of `[1].get(...)`."""
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"x")
+    for text in ("[1]", '"x"', "7", "null", '{"model_file": "model.bin"}'):  # the last: an object without inputs
+        (tmp_path / "oaax-manifest.json").write_text(text)
+        with pytest.raises(modelio.NoModelIO, match="cannot tell what the model takes"):
+            modelio.discover(str(model), [])
+
+
+def _peak_memory_mb_of(code: str, *args: str):
+    import subprocess
+    import sys
+
+    done = subprocess.run([sys.executable, "-c", "import resource, sys\n" + code + "\nprint('MAXRSS_MB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)", *args],
+                          capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    return done.stdout, int(done.stdout.rsplit("MAXRSS_MB", 1)[1])
+
+
+@pytest.fixture
+def huge_model(tmp_path):
+    path = tmp_path / "model.onnx"
+    with open(path, "wb") as f:
+        f.write(b"MOCKMODEL")
+        f.truncate(3 << 30)  # sparse: 3 GiB that onnx.load would read whole
+    return path
+
+
+def test_a_toolchain_written_model_over_2_gib_is_never_read_into_memory(huge_model):
+    """D3: onnx.load read the whole file (8.4 GB of peak memory for a sparse 8 GiB `model.onnx`): a file larger than RAM would kill the testing host."""
+    out, peak = _peak_memory_mb_of("""
+from oaax_conformance import modelio
+try:
+    modelio.discover(sys.argv[1], [])
+except modelio.NoModelIO as e:
+    print("NOMODELIO", e)
+""", str(huge_model))
+    assert "NOMODELIO" in out and "GB: the suite does not read a model that big into memory" in out and "--input" in out
+    assert peak < 1000, f"peak memory {peak} MB"
+
+
+def test_the_converted_models_io_is_not_read_from_a_huge_file_either(huge_model):
+    out, peak = _peak_memory_mb_of("""
+from oaax_conformance.checks.toolchain import _io_views
+from oaax_conformance.registry import Blocked
+try:
+    _io_views(sys.argv[1], None)
+except Blocked as e:
+    print("BLOCKED", e)
+""", str(huge_model))
+    assert "BLOCKED" in out and "GB" in out and peak < 1000, (out, peak)

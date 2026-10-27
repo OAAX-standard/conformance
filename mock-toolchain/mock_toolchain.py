@@ -160,10 +160,12 @@ def main(argv: list[str]) -> int:
         return 0 if fault("unwritable_ok") else fail(out, f"cannot create the output directory: {e}")
     if fault("writes_input_dir"):
         open(path + ".cache", "w").close()
-    model_name = model_name_override or ("model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
+    model_name = model_name_override or ("model.onnx" if fault("huge_model") else "model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+            if fault("huge_model"):  # sparse: no disk is used, but onnx.load would read 3 GiB
+                f.truncate(3 << 30)
     if fault("two_models"):  # a second file the runtime also loads, sorting before model.bin
         with open(os.path.join(out, "a-copy.bin"), "wb") as f:
             f.write(b"MOCKMODEL" + data)
@@ -177,20 +179,23 @@ def main(argv: list[str]) -> int:
         os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
         open(os.path.join(out, "sub", "deep", "file"), "w").close()
     write_log(out, True, "converted")
-    io = None if fault("no_manifest") or fault("vendor_format") else describe(data, out)
+    io = None if fault("no_manifest") or fault("vendor_format") or fault("huge_model") else describe(data, out)
     if io:
         doc = {"schema": "oaax-manifest/1", "oaax_version": "2.1", "model_file": "model.bin", "precision": "FP32", "equivalent": True, **io}
         if fault("raw_heads"):  # the runtime returns something else than the ONNX outputs: declared honestly
             doc["equivalent"] = False
             doc["outputs"] = [{"name": "head0", "native": {"dtype": "FLOAT", "shape": [1, 8], "layout": "XX"}}]
         target = os.path.join(out, "oaax-manifest.json")
+        payload = next((v for f, v in (("manifest_list", [1]), ("manifest_string", "x"), ("manifest_number", 7)) if fault(f)), None)  # valid JSON that is no object
+        if fault("manifest_no_inputs"):
+            del doc["inputs"]
         if fault("fifo_manifest"):  # a named pipe where the manifest should be: whoever opens it blocks forever
             os.mkfifo(target)
         elif fault("link_manifest"):  # a link to something endless
             os.symlink("/dev/zero", target)
         else:
             with open(target, "w") as f:
-                json.dump(tamper(doc), f)
+                json.dump(payload if payload is not None else tamper(doc), f)
                 if fault("huge_manifest"):  # sparse: no disk is used
                     f.truncate(40 << 20)
     if fault("no_perm"):

@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .safefile import read_json
+from .safefile import model_too_big, read_json
 
 DTYPES = {"FLOAT", "UINT8", "INT8", "UINT16", "INT16", "INT32", "INT64", "BOOL", "FLOAT16", "DOUBLE", "UINT32", "UINT64", "BFLOAT16"}
 
@@ -77,7 +77,7 @@ def _from_manifest(path: Path, model: Path) -> ModelIO | None:
             return None
         view = lambda t: Tensor(t["name"], t["native"]["dtype"], tuple(None if d < 1 else d for d in t["native"]["shape"]))  # noqa: E731
         return ModelIO(tuple(view(t) for t in doc["inputs"]), tuple(view(t) for t in doc["outputs"]))
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError):  # not an object (`[1]`, `"x"`), a missing key: a manifest that is not this model's
         return None
 
 
@@ -86,6 +86,8 @@ def _from_onnx(model: Path) -> ModelIO:
         import onnx
     except ImportError:
         raise NoModelIO("cannot read the ONNX model: install the onnx extra (README, Install), or use --input")
+    if too_big := model_too_big(model):  # a toolchain wrote this file: onnx.load would read all of it into memory
+        raise NoModelIO(too_big)
     try:
         graph = onnx.load(str(model), load_external_data=False).graph
     except Exception as e:  # noqa: BLE001 - a missing file, a protobuf error: all mean "cannot read it"

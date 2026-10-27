@@ -489,3 +489,31 @@ def test_the_copy_of_an_output_directory_does_not_copy_big_files(tmp_path):
             shutil.rmtree(copy.root)
     finally:
         shutil.rmtree(first.root)
+
+
+# ---- round 7 ---------------------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fault", ["manifest_list", "manifest_string", "manifest_number", "manifest_no_inputs"])
+def test_a_manifest_that_is_not_a_usable_object_never_crashes_a_check(build_dir, mock_io_onnx, toolchain_images, tmp_path, fault):
+    """D1: valid JSON that is no object (`[1]`, `"x"`, `7`) or lacks `inputs` made TC-25 and E2E-01..04 ERROR (exit 4, "a bug of the suite") on what a toolchain wrote."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, fault, tmp_path), ["TC-24", "TC-25", "E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    assert [(i, r.message) for i, r in results.items() if r.outcome == "error"] == []
+    assert results["TC-24"].outcome in ("warn", "fail") and results["TC-24"].message  # said once, where it belongs
+    assert results["TC-25"].outcome == "na"
+    assert results["E2E-01"].outcome == "pass"  # the file is judged without the manifest
+
+
+def test_a_huge_model_never_makes_the_suite_read_it_into_memory(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D3, end to end: a toolchain that writes a sparse 3 GiB `model.onnx` and no manifest."""
+    import subprocess
+    import sys
+
+    code = ("import resource, sys\nfrom oaax_conformance import cli\nrc = cli.main(sys.argv[1:])\n"
+            "print('MAXRSS_MB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)\nsys.exit(rc)")
+    argv = ["toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=huge_model", "--runtime", str(build_dir / "libmock_runtime.so"), "--harness",
+            str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1", "--only", "E2E-01", "--only", "E2E-04", "--quiet"]
+    done = subprocess.run([sys.executable, "-c", code, *argv], capture_output=True, text=True, timeout=600)
+    peak = int(done.stdout.rsplit("MAXRSS_MB", 1)[1])
+    assert "E2E-04" in done.stdout and "ERROR" not in done.stdout.split("Details")[-1].split("Result")[0], done.stdout[-1500:]
+    assert "GB: the suite does not read a model that big" in done.stdout.replace("\n", " ") or "GB" in done.stdout
+    assert peak < 1500, f"peak memory {peak} MB"

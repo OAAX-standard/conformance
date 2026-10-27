@@ -6,7 +6,7 @@ from pathlib import Path
 from .. import manifest
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
-from ..safefile import MAX_JSON_BYTES, read_json
+from ..safefile import MAX_JSON_BYTES, model_too_big, read_json
 from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, Workspace, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
@@ -162,13 +162,26 @@ def readable_outputs(ctx):
         raise Fail("not readable by the user who started the container: " + ", ".join(unreadable[:5]))
 
 
-def _manifest_doc(run):
+def _manifest_raw(run):
+    """The manifest as the toolchain wrote it (any JSON value), None when there is none. Only TC-24 judges what is in it."""
     if MANIFEST not in run.files():
         return None
     try:
         return _read_json(run, MANIFEST)
     except (OSError, ValueError) as e:
         raise Fail(f"{MANIFEST} is not valid JSON: {e}")
+
+
+def _manifest_doc(run):
+    """The manifest if it is a usable one: a JSON object that the schema accepts. A list, a string, a number, an object without `inputs` is not: TC-24 reports it
+    and every other check goes on as if there were no manifest, never with a crash (what a toolchain writes is never a bug of the suite)."""
+    try:
+        doc = _manifest_raw(run)
+    except (Fail, Warn):  # not JSON, too big: TC-24 says so
+        return None
+    if not isinstance(doc, dict) or manifest.validate(doc, str(run.result_dir)):
+        return None
+    return doc
 
 
 @check("TC-23")
@@ -182,7 +195,7 @@ def bundle_manifest(ctx):
 @check("TC-24")
 def manifest_is_valid(ctx):
     run = _valid(ctx)
-    doc = _manifest_doc(run)
+    doc = _manifest_raw(run)
     if doc is None:
         raise NotApplicable("no manifest (see TC-23)")
     problems = manifest.validate(doc, str(run.result_dir))
@@ -195,7 +208,7 @@ def manifest_matches_the_model(ctx):
     run = _valid(ctx)
     doc = _manifest_doc(run)
     if doc is None:
-        raise NotApplicable("no manifest (see TC-23)")
+        raise NotApplicable("no usable manifest (see TC-23 and TC-24)")
     try:
         original = manifest.derive_io(ctx.onnx_path)
     except ImportError:
@@ -421,6 +434,8 @@ def _io_views(model_path: str, doc: dict | None):
             return None  # outputs without an onnx view: the manifest says the model is not equivalent (checked by the caller)
         return [{t["name"]: (t["onnx"]["dtype"], tuple(t["onnx"]["shape"])) for t in doc[k]} for k in ("inputs", "outputs")]
     if Path(model_path).suffix == ".onnx":
+        if too_big := model_too_big(model_path):  # written by the toolchain: never read a file of this size into memory
+            raise Blocked(too_big)
         io = manifest.derive_io(model_path)
         return [{t["name"]: (t["onnx"]["dtype"], tuple(t["onnx"]["shape"])) for t in io[k]} for k in ("inputs", "outputs")]
     return None
