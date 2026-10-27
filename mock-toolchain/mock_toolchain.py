@@ -161,6 +161,9 @@ def main(argv: list[str]) -> int:
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("two_models"):  # a second file the runtime also loads, sorting before model.bin
+        with open(os.path.join(out, "a-copy.bin"), "wb") as f:
+            f.write(b"MOCKMODEL" + data)
     if fault("second_file"):  # vendor metadata next to the model (2.0 toolchains have no manifest to say which file is the model)
         with open(os.path.join(out, "a-labels.json"), "w") as f:
             f.write('{"labels": ["face"]}')
@@ -177,8 +180,16 @@ def main(argv: list[str]) -> int:
         if fault("raw_heads"):  # the runtime returns something else than the ONNX outputs: declared honestly
             doc["equivalent"] = False
             doc["outputs"] = [{"name": "head0", "native": {"dtype": "FLOAT", "shape": [1, 8], "layout": "XX"}}]
-        with open(os.path.join(out, "oaax-manifest.json"), "w") as f:
-            json.dump(tamper(doc), f)
+        target = os.path.join(out, "oaax-manifest.json")
+        if fault("fifo_manifest"):  # a named pipe where the manifest should be: whoever opens it blocks forever
+            os.mkfifo(target)
+        elif fault("link_manifest"):  # a link to something endless
+            os.symlink("/dev/zero", target)
+        else:
+            with open(target, "w") as f:
+                json.dump(tamper(doc), f)
+                if fault("huge_manifest"):  # sparse: no disk is used
+                    f.truncate(40 << 20)
     if fault("no_perm"):
         for name in os.listdir(out):
             os.chmod(os.path.join(out, name), 0o600)

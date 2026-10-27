@@ -369,3 +369,61 @@ def test_the_copy_of_an_output_directory_keeps_files_and_links_and_never_opens_a
             shutil.rmtree(copy.root)
     finally:
         shutil.rmtree(first.root)
+
+
+@pytest.mark.parametrize("fault", ["fifo_manifest", "link_manifest", "huge_manifest"])
+def test_a_manifest_that_is_not_a_small_regular_file_never_hangs_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path, fault):
+    """C8: a named pipe called oaax-manifest.json hung the whole suite in E2E (modelio read it for every scenario)."""
+    import signal
+
+    def alarm(*_):
+        raise TimeoutError("the suite hung")
+
+    old = signal.signal(signal.SIGALRM, alarm)
+    signal.alarm(150)
+    try:
+        results = _run(_context(build_dir, mock_io_onnx, CLEAN, fault, tmp_path), ["TC-01", "E2E-01", "E2E-02"])
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert results["TC-01"].outcome == "pass"
+    assert results["E2E-01"].outcome in ("pass", "blocked") and results["E2E-02"].outcome == "blocked"
+    assert "manifest" in results["E2E-02"].message
+
+
+def test_the_end_to_end_tests_prefer_model_dot_star_and_say_which_file_they_judged(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C3: with two loadable output files and no manifest E2E silently tested the alphabetically first one and no report named it."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "two_models,no_manifest", tmp_path), ["E2E-01"])
+    r = results["E2E-01"]
+    assert r.outcome == "pass", r.message
+    assert r.note.startswith("the end-to-end tests judge the output file model.bin (the first of 2 output files that the runtime loads (model.bin, a-copy.bin)")
+    assert "--model-file" in r.note
+
+
+def test_a_manifest_names_the_model_and_the_note_says_so(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path), ["E2E-01", "E2E-02", "E2E-03", "E2E-04"])
+    for test_id, r in results.items():
+        assert r.outcome == "pass", (test_id, r.message)
+        assert r.note == "the end-to-end tests judge the output file model.bin (named by the manifest)", (test_id, r.note)  # the same file in all four
+
+
+def test_an_explicit_model_file_is_the_one_judged_and_the_note_says_so(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    from oaax_conformance.toolchain import ToolchainContext
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "two_models", tmp_path)
+    ctx.model_file = "a-copy.bin"
+    results = _run(ctx, ["E2E-01"])
+    assert results["E2E-01"].outcome == "pass" and "a-copy.bin (chosen with --model-file)" in results["E2E-01"].note
+
+
+def test_every_dump_directory_of_every_candidate_is_removed_at_close(build_dir, mock_io_onnx, tmp_path):
+    """C6: only the last candidate's dump directory was removed; the others stayed in /tmp."""
+    import os
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    for name in ("a.bin", "b.bin", "c.bin"):
+        ctx.runtime_context(str(tmp_path / name))
+    dumps = list(ctx._dumps)
+    assert len(dumps) == 3 and all(os.path.isdir(d) for d in dumps)
+    ctx.close()
+    assert not [d for d in dumps if os.path.exists(d)]

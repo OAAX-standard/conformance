@@ -229,7 +229,8 @@ class ToolchainContext:
     timeouts: dict = field(default_factory=dict)  # conversion name -> why it blocks: it did not finish in time
     live: set = field(default_factory=set)  # names of the containers started and not yet finished
     _inspect: dict | None = None
-    _dump: str | None = None
+    _dumps: list = field(default_factory=list)  # one dump directory per runtime context (every E2E candidate gets its own): all removed at close()
+    _picked: tuple | None = None  # (runtime Context, model path, why it was chosen): E2E-01..04 all judge this one file
     progress: bool = False  # print each conversion to stderr as it starts
     model_file: str | None = None  # --model-file: which output file is the model
     candidates: list = field(default_factory=list)  # the output files that were tried as the model (E2E)
@@ -242,8 +243,9 @@ class ToolchainContext:
             return None
         key = f"runtime:{model_path}"
         if key not in self._runs:
-            self._dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
-            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=self._dump, warmup_ms=self.warmup_ms)
+            dump = tempfile.mkdtemp(prefix="oaax-conformance-dump-")
+            self._dumps.append(dump)
+            self._runs[key] = Context(self.runtime_lib, self.harness, list(self.init_config), model_path, timeout=self.runtime_timeout, dump_dir=dump, warmup_ms=self.warmup_ms)
         return self._runs[key]
 
     def model_bytes(self) -> bytes:
@@ -393,8 +395,8 @@ class ToolchainContext:
             except OSError:
                 self.leftovers.append(str(ws.root))
         self.workspaces.clear()
-        if self._dump:
-            shutil.rmtree(self._dump, ignore_errors=True)
+        for dump in self._dumps:
+            shutil.rmtree(dump, ignore_errors=True)
 
     def _make_removable(self, ws: Workspace) -> None:
         cmd = ["docker", "run", "--rm", "--user", "0", "--network", "none", "-v", f"{ws.root}:/w", "--entrypoint", "chmod", self.image, "-R", "a+rwX", "/w"]

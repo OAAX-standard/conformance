@@ -6,6 +6,7 @@ from pathlib import Path
 from .. import manifest
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
+from ..safefile import MAX_JSON_BYTES, read_json
 from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, Workspace, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
@@ -119,17 +120,12 @@ def a_model_file(ctx):
         raise Fail(f"no non-empty file besides the log in the output directory (found: {', '.join(run.files()) or 'nothing'})")
 
 
-MAX_JSON_BYTES = 10 << 20
-
-
 def _read_json(run, name: str):
-    """JSON of a file the toolchain wrote: opened without following links or blocking, and only up to 10 MB (a 3 GB "log" is the toolchain's problem, not a MemoryError of the suite)."""
+    """JSON of a file the toolchain wrote: see safefile (no link followed, nothing that blocks, at most 10 MB: a 3 GB "log" is the toolchain's problem)."""
     size = run.files()[name]["size"]
     if size > MAX_JSON_BYTES:
         raise Warn(f"{name} is {size / 1e6:.0f} MB: the suite reads at most {MAX_JSON_BYTES >> 20} MB, so its content was not checked")
-    fd = os.open(run.result_dir / name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    with os.fdopen(fd, "rb") as f:
-        return json.loads(f.read(MAX_JSON_BYTES + 1).decode("utf-8"))
+    return read_json(run.result_dir / name)
 
 
 def _log_problem(run) -> str | None:
@@ -347,29 +343,45 @@ def default_user(ctx):
 
 
 def _converted(ctx):
-    """(runtime Context for the converted model, path of that model) or Blocked."""
+    """(runtime Context for the converted model, path of that model) or Blocked. The file is chosen once and every E2E check judges that same file;
+    each check's result carries a note that names it."""
     run = _valid(ctx)
     if run.returncode != 0 or run.timed_out:
         raise Blocked("the conversion of TC-01 failed")
     if not ctx.runtime_lib:
         raise Blocked("needs --runtime LIB: the runtime that loads what this toolchain produces")
-    doc = _manifest_doc(run)
+    if ctx._picked is None:
+        ctx._picked = _pick_model(ctx, run)
+    rctx, path, why = ctx._picked
+    ctx.notes.append(f"the end-to-end tests judge the output file {Path(path).name} ({why})")
+    return rctx, path
+
+
+def _pick_model(ctx, run):
+    """Which output file is the model. A 2.0 toolchain has no manifest and vendor metadata may sit next to the model, so: --model-file, else the
+    manifest's model_file, else the files in the order `model.*` first, then by name, and the first one the runtime loads."""
+    try:
+        doc = _manifest_doc(run)
+    except Warn as w:  # a manifest too big to read: the model cannot be judged against it
+        raise Blocked(str(w))
     if ctx.model_file:
         if ctx.model_file not in run.files():
             raise Blocked(f"--model-file {ctx.model_file}: not in the output directory (found: {', '.join(run.files()) or 'nothing'})")
-        names = [ctx.model_file]
+        names, why = [ctx.model_file], "chosen with --model-file"
     elif doc and doc.get("model_file") in run.files():
-        names = [doc["model_file"]]
+        names, why = [doc["model_file"]], "named by the manifest"
     else:
-        names = sorted(run.model_files())  # a 2.0 toolchain has no manifest: vendor metadata may sit next to the model, so the runtime tells which file is it
+        names, why = sorted(run.model_files(), key=lambda n: (Path(n).stem != "model", n)), None
     if not names:
         raise Blocked("the conversion left no model file (see TC-20)")
     ctx.candidates = names
+    if why is None:
+        why = "the only file" if len(names) == 1 else f"the first of {len(names)} output files that the runtime loads ({', '.join(names)}); --model-file NAME picks another"
     for name in names:
         rctx = ctx.runtime_context(str(run.result_dir / name))
         if len(names) == 1 or rctx.run("load-twice").end != "model":
-            return rctx, str(run.result_dir / name)
-    return ctx.runtime_context(str(run.result_dir / names[0])), str(run.result_dir / names[0])  # none loads: E2E-01 says so, the others are blocked on it
+            return rctx, str(run.result_dir / name), why
+    return ctx.runtime_context(str(run.result_dir / names[0])), str(run.result_dir / names[0]), "none of the output files loads"  # E2E-01 says so, the others are blocked on it
 
 
 @check("E2E-01")
