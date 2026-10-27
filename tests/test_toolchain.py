@@ -107,7 +107,7 @@ def test_the_suite_removes_its_temporary_directories(build_dir, mock_io_onnx, to
 
     ctx = _context(build_dir, mock_io_onnx, CLEAN, "zip_slip", tmp_path)
     run_suite(ctx, ["TC-39", "E2E-02"], prefixes=("TC-", "E2E-"))
-    roots = [ws.root for ws in ctx.workspaces] + ([Path(ctx._dump)] if ctx._dump else [])
+    roots = [ws.root for ws in ctx.workspaces] + [Path(d) for d in ctx._dumps]
     assert roots
     ctx.close()
     assert not [r for r in roots if r.exists()] and ctx.leftovers == []
@@ -277,7 +277,7 @@ def test_vendor_metadata_next_to_the_model_does_not_block_the_end_to_end_tests(b
 
 def test_no_output_file_loads_is_a_failure_that_names_the_candidates_and_the_way_out(build_dir, mock_io_onnx, toolchain_images, tmp_path):
     results = _run(_context(build_dir, mock_io_onnx, CLEAN, "corrupt_model,second_file,no_manifest", tmp_path), ["E2E-01", "E2E-02"])
-    assert results["E2E-01"].outcome == "fail" and "a-labels.json, model.bin" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
+    assert results["E2E-01"].outcome == "fail" and "model.bin, a-labels.json" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
     assert results["E2E-02"].outcome == "blocked"
 
 
@@ -454,3 +454,38 @@ def test_a_runtime_secret_cut_by_the_tail_never_shows_half_of_it(tmp_path):
     run = run_scenario(str(script), "static", "libx.so", [f"key={token}"], timeout=10)
     assert token not in run.stdout_tail and all(token[-n:] not in run.stdout_tail for n in range(3, len(token) + 1)), run.stdout_tail[:60]
     assert len(run.stdout_tail) <= TAIL
+
+
+def test_the_tc08_copy_never_holds_the_big_model_a_second_time(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C10(4): the workspace of TC-08's second conversion was not pruned like the others, so a multi-GB model existed up to three times."""
+    from oaax_conformance.toolchain import KEEP_BYTES
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "big_output", tmp_path)
+    try:
+        results = {r.id: r for r in run_suite(ctx, ["TC-01", "TC-08"], prefixes=("TC-", "E2E-")).results}
+        assert results["TC-08"].outcome == "pass" and len(ctx.workspaces) >= 2
+        baseline, others = ctx.workspaces[0], ctx.workspaces[1:]
+        assert any(p.stat().st_size > KEEP_BYTES for p in baseline.out_dir.rglob("*") if p.is_file())  # E2E still loads the baseline's model
+        assert [p for ws in others for p in ws.out_dir.rglob("*") if p.is_file() and p.stat().st_size > KEEP_BYTES] == []
+    finally:
+        ctx.close()
+
+
+def test_the_copy_of_an_output_directory_does_not_copy_big_files(tmp_path):
+    from oaax_conformance.toolchain import KEEP_BYTES, Workspace
+
+    first = Workspace.create()
+    try:
+        with open(first.out_dir / "big.bin", "wb") as f:
+            f.write(b"x" * 1000)
+            f.truncate(4 * KEEP_BYTES)  # sparse stand-in for a compiled model
+        (first.out_dir / "small.json").write_text("{}")
+        copy = Workspace.with_output_of(first)
+        try:
+            placeholder = copy.out_dir / "big.bin"
+            assert placeholder.stat().st_size == 4 * KEEP_BYTES and placeholder.stat().st_blocks * 512 < KEEP_BYTES  # same name and size, no disk
+            assert (copy.out_dir / "small.json").read_text() == "{}"
+        finally:
+            shutil.rmtree(copy.root)
+    finally:
+        shutil.rmtree(first.root)

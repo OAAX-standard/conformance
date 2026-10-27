@@ -97,7 +97,7 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
   and every call the harness made. Print it to PDF from the browser: the print layout opens every section.
 - `report.json`: everything in the page, for tools and archiving (library sha256, platform, per-test result with evidence, full call transcripts).
   Values given to `--init-config` or as docker environment variables (`-e`, `--env`, in any spelling docker accepts: `-eNAME=V`, `-e=NAME=V`, clusters such as `-te NAME=V`, also `-e NAME` taken from your environment) are never stored, and directories are removed from every message. Other docker flags (`--label`, `--add-host`...) are shown as given, so keep secrets out of them; `--env-file` is refused, and so is a cluster of short flags the suite cannot read with certainty. The flags the suite sets itself (`--user`/`-u`, `-v`/`--volume`/`--mount`, `--network`/`--net`, `--entrypoint`, `--read-only`, `--privileged`, `--rm`, `--name`) are refused in every spelling (`-u0`, `-tu 0`, `-v/x:/y`, `--user=0`).
-- `junit.xml`: for CI.
+- `junit.xml`: for CI. `failures` = failed, `errors` = crashed checks and MUSTs that could not run, `skipped` = the other blocked checks and every n/a (with the reason); passed = pass + warn, and the properties `outcome_pass`, `outcome_warn`... give the same counts as the console and `report.json`.
 
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself

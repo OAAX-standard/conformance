@@ -729,8 +729,8 @@ def test_a_limited_selection_says_so_everywhere(build_dir, tmp_path, capsys):
     assert re.search(r"Only 2 of \d+ approved checks were selected", capsys.readouterr().out)
     doc = json.loads((out / "report.json").read_text())
     assert doc["summary"]["checks_selected"] == 2 and doc["summary"]["checks_approved"] > 50
-    prop = ET.parse(out / "junit.xml").getroot().find("properties/property")
-    assert prop.get("name") == "checks_selected" and prop.get("value").startswith("2 of ")
+    props = {p.get("name"): p.get("value") for p in ET.parse(out / "junit.xml").getroot().iter("property")}
+    assert props["checks_selected"].startswith("2 of ")
 
 
 def test_a_full_run_does_not_claim_to_be_partial(build_dir, tmp_path, capsys):
@@ -779,8 +779,8 @@ def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
 
 # ---- round 5, A16: a file that is not a runtime library is one line, not 60 BLOCKED rows -----------------------------------------------------------
 
-@pytest.mark.parametrize("kind,cause", [("empty", "file too short"), ("text", "file too short|invalid ELF header"), ("executable", "cannot dynamically load|not a dynamic executable"),
-                                        ("elf32", "wrong ELF class")])
+@pytest.mark.parametrize("kind,cause", [("empty", "is empty"), ("text", "not an ELF file"), ("executable", "cannot dynamically load|not a dynamic executable"),
+                                        ("elf32", "32-bit library")])  # round 6: read from the ELF header up front (libcheck), before dlopen is asked
 def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path, capsys, kind, cause):
     """A16: a 0-byte file, a text file or an executable as the "runtime" gave 60+ BLOCKED rows, exit 2 and a wrong "set LD_LIBRARY_PATH" hint."""
     import shutil
@@ -911,3 +911,62 @@ def test_rt_s_02_is_blocked_not_passed_when_nm_cannot_read_the_library(tmp_path)
     broken.write_bytes(b"\x7fELF" + b"\0" * 60)  # has the magic, nm cannot read it: its empty listing used to count as "no extra symbols"
     with pytest.raises(Blocked, match="nm could not read"):
         only_the_nine_exports(types.SimpleNamespace(lib=str(broken)))
+
+
+# ---- round 6 (C10): the three report formats tell the same story ----------------------------------------------------------------------------
+
+def _results_of_every_kind():
+    R = report.Result
+    return [R("A1", "t", "MUST", "s", "pass"), R("A2", "t", "MUST", "s", "pass"), R("A3", "t", "SHOULD", "s", "pass"),
+            R("B1", "t", "SHOULD", "s", "warn", "slow"), R("B2", "t", "MUST", "s", "warn", "slow cleanup"),
+            R("C1", "t", "MUST", "s", "fail", "bad"), R("D1", "t", "MUST", "s", "blocked", "no model"), R("D2", "t", "SHOULD", "s", "blocked", "no model"),
+            R("E1", "t", "SHOULD", "s", "skipped", "--skip"), R("F1", "t", "SHOULD", "s", "na", "one input"), R("F2", "t", "PROPOSED", "s", "na", "one input"),
+            R("G1", "t", "MUST", "s", "error", "a bug")]
+
+
+def _document_of(results, selected=None, approved=62):
+    import types
+
+    suite = types.SimpleNamespace(results=results, not_approved=0, runs={}, leftovers=[], selected=selected if selected is not None else approved, approved=approved)
+    return report._document(suite, "2.0", {"kind": "toolchain", "name": "img", "sha256": "0" * 8, "detail": "d"}, {"docker_args": [], "runtime": None}, [], [])
+
+
+def test_console_json_and_junit_counts_reconcile(tmp_path):
+    """C10(1): JUnit counted warn and n/a as passed (console 42 pass, 5 warn, 3 n/a against JUnit failures=4 errors=1 skipped=7): nothing was reconcilable."""
+    results = _results_of_every_kind()
+    doc = _document_of(results)
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), doc)
+    suite = ET.parse(path).getroot()
+    shown = {}
+    summary_line = next(l for l in report.console(results, 0).splitlines() if "draft tests not run" in l)
+    for part in summary_line.split("  (")[0].split(", "):  # "3 pass, 2 warn, ..."
+        n, name = part.split(" ", 1)
+        shown["na" if name == "n/a" else name] = int(n)
+    props = {p.get("name"): p.get("value") for p in suite.iter("property")}
+    in_junit = {o: int(props[f"outcome_{o}"]) for o in report.COLORS if int(props[f"outcome_{o}"])}
+    assert shown == in_junit == {o: n for o, n in doc["summary"]["counts"].items() if n}
+    failures, errors, skipped, tests = (int(suite.get(k)) for k in ("failures", "errors", "skipped", "tests"))
+    assert tests == len(results) == sum(shown.values())
+    assert failures == shown["fail"] and errors == shown["error"] + 1  # + the blocked MUST (INCOMPLETE)
+    assert skipped == (shown["blocked"] - 1) + shown["skipped"] + shown["na"]  # the blocked SHOULD, the skipped, and every n/a
+    assert tests - failures - errors - skipped == shown["pass"] + shown["warn"]  # what JUnit calls passed is pass + warn, and the warns are listed
+    cases = {c.get("name").split(" ")[0]: c for c in suite.iter("testcase")}
+    assert all("WARNING" in cases[i].find("system-out").text for i in ("B1", "B2"))
+    assert all("not applicable" in cases[i].find("skipped").get("message") for i in ("F1", "F2"))
+
+
+def test_the_html_report_says_when_only_some_checks_were_selected():
+    """C10(2): the console, the JSON and the JUnit said "2 of 62 selected"; the HTML did not."""
+    from oaax_conformance import html_report
+
+    results = _results_of_every_kind()[:2]
+    assert "Only 2 of 62 approved checks were selected" in html_report.render(_document_of(results, selected=2))
+    assert "approved checks were selected" not in html_report.render(_document_of(results, selected=62))
+
+
+def test_the_changelog_counts_the_review_rounds_that_were_run():
+    from pathlib import Path
+
+    text = Path(__file__).resolve().parent.parent.joinpath("CHANGELOG.md").read_text()
+    assert "six adversarial review rounds" in text and "five adversarial" not in text

@@ -104,6 +104,10 @@ def _test(r: dict, scenarios: dict) -> str:
 
 def render(doc: dict) -> str:
     code, subject, summary = doc["verdict"]["exit_code"], doc["subject"], doc["summary"]
+    partial = ""
+    if summary.get("checks_selected") is not None and summary["checks_selected"] < summary["checks_approved"]:  # as in the console, the JSON and the JUnit
+        partial = (f'<p class="msg" style="background:var(--warn-bg);margin:14px 0 0">Only {summary["checks_selected"]} of {summary["checks_approved"]} approved checks '
+                   "were selected: the result says nothing about the others.</p>")
     verdict_class = {0: "pass", 1: "fail", 2: "blocked", 4: "error"}[code]
     kind = subject["kind"]
     tiles = "".join(
@@ -135,7 +139,7 @@ def render(doc: dict) -> str:
 <dl class="small"><dt>{"Image" if kind == "toolchain" else "Library"}</dt><dd class="mono">{escape(subject["name"])}</dd><dt>{"Image id" if kind == "toolchain" else "SHA-256"}</dt><dd class="mono">{escape(subject["sha256"])}</dd>
 <dt>Platform</dt><dd>{escape(doc["platform"])}</dd><dt>Run</dt><dd>{escape(doc["generated_at"])} · suite {escape(doc["suite_version"])}</dd>
 <dt>Options</dt><dd>{options_line}</dd></dl>
-<p class="muted small" style="margin:14px 0 0">{escape(doc["verdict"]["note"])} {summary["draft_tests_not_run"]} draft test(s) were not run.</p>{leftovers}</div>
+{partial}<p class="muted small" style="margin:14px 0 0">{escape(doc["verdict"]["note"])} {summary["draft_tests_not_run"]} draft test(s) were not run.</p>{leftovers}</div>
 <h2>Tests</h2><div class="legend">{legend}</div>
 <div class="bar"><button data-f="all" aria-pressed="true">All ({summary["total"]})</button>
 <button data-f="problems" aria-pressed="false">Not passing ({summary["total"] - summary["counts"]["pass"]})</button></div>

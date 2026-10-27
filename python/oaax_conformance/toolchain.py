@@ -103,7 +103,11 @@ class Workspace:
                     target.mkdir()
                     copy(Path(entry.path), target)
                 elif entry.is_file(follow_symlinks=False):
-                    shutil.copy2(entry.path, target)
+                    if entry.stat(follow_symlinks=False).st_size > KEEP_BYTES:  # a compiled model is GB: the toolchain sees a file of that name and size, no disk is used
+                        with open(target, "wb") as f:
+                            f.truncate(entry.stat(follow_symlinks=False).st_size)
+                    else:
+                        shutil.copy2(entry.path, target)
 
         copy(other.out_dir, ws.out_dir)
         return ws
@@ -334,7 +338,7 @@ class ToolchainContext:
                          _redact(hide_secrets(err.decode(errors="replace"), secrets), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
         # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
         _drop_big_files(ws.in_dir)
-        if name != "valid" and workspace is None:
+        if name != BASELINE:  # also the TC-08 copy: a multi-GB model must never exist three times
             _drop_big_files(ws.out_dir)
         if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
             self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"

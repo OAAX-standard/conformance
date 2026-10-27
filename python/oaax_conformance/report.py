@@ -215,12 +215,16 @@ def write_junit(path: str, doc: dict) -> None:
     # a MUST that could not run or was skipped is INCOMPLETE (exit code 2): an <error>, so that a CI tool reading only this file does not show green
     incomplete = lambda r: r.outcome in ("blocked", "skipped") and r.level == "MUST"  # noqa: E731
     count = lambda pred: str(sum(1 for r in results if pred(r)))  # noqa: E731
+    # JUnit has four states; ours has seven. failures = fail, errors = error + an INCOMPLETE MUST, skipped = blocked/skipped SHOULD+ and n/a (the reason is the message),
+    # passed = pass + warn: the warn count is a property and every warn carries its text, so nothing is hidden and the properties reconcile with the console and the JSON.
     suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)), failures=count(lambda r: r.outcome == "fail"),
                        errors=count(lambda r: r.outcome == "error" or incomplete(r)),
-                       skipped=count(lambda r: r.outcome in ("blocked", "skipped") and not incomplete(r)))
+                       skipped=count(lambda r: r.outcome in ("blocked", "skipped", "na") and not incomplete(r)))
+    props = ET.SubElement(suite, "properties")
+    for outcome in COLORS:
+        ET.SubElement(props, "property", name=f"outcome_{outcome}", value=count(lambda r, o=outcome: r.outcome == o))
     selected = doc.get("summary", {})
     if selected.get("checks_selected") is not None:  # a limited selection must not look like a full run to a CI that reads only this file
-        props = ET.SubElement(suite, "properties")
         ET.SubElement(props, "property", name="checks_selected", value=f"{selected['checks_selected']} of {selected['checks_approved']}")
     for r in results:
         case = ET.SubElement(suite, "testcase", classname=r.level, name=f"{r.id} {r.title}")
@@ -230,6 +234,8 @@ def write_junit(path: str, doc: dict) -> None:
             ET.SubElement(case, "error", type=r.outcome.upper() if r.outcome == "error" else "INCOMPLETE", message=r.message).text = f"spec: {r.source}"
         elif r.outcome in ("blocked", "skipped"):
             ET.SubElement(case, "skipped", message=r.message)
+        elif r.outcome == "na":
+            ET.SubElement(case, "skipped", message=f"not applicable: {r.message}")
         elif r.outcome == "warn":
             ET.SubElement(case, "system-out").text = f"WARNING [{r.level}] {r.message}"
         if r.note:
