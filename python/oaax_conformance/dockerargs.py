@@ -90,5 +90,6 @@ def foreground_problem(args: list[str]) -> str | None:
                "-d/--detach, -a/--attach, --restart and --cidfile are refused"
     interactive, tty = uses(args, ("-i", "--interactive")), uses(args, ("-t", "--tty"))
     if interactive and tty:
-        return f"{interactive} together with {tty}: docker cannot attach stdin to a terminal when the suite's stdin is /dev/null; use either one, not both"
+        both = "-i and -t together" if interactive == tty else f"{interactive} together with {tty}"
+        return f"{both}: docker cannot attach stdin to a terminal when the suite's stdin is /dev/null; use either one, not both"
     return None

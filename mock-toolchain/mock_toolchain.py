@@ -96,7 +96,10 @@ def describe(data: bytes, out: str) -> dict | None:
         os.remove(path)
 
 
-def tamper(doc: dict) -> dict:
+def tamper(doc: dict, out: str) -> dict:
+    if fault("manifest_names_link"):  # model_file is a link to the model: validate() followed it, the suite's listing does not
+        os.symlink("model.bin", os.path.join(out, "model.lnk"))
+        doc["model_file"] = "model.lnk"
     if fault("manifest_invalid"):
         doc["inputs"][0]["native"]["dtype"] = "STRING"
     if fault("manifest_wrong_names"):
@@ -206,7 +209,7 @@ def main(argv: list[str]) -> int:
             os.symlink("/dev/zero", target)
         else:
             with open(target, "w") as f:
-                json.dump(payload if payload is not None else tamper(doc), f)
+                json.dump(payload if payload is not None else tamper(doc, out), f)
                 if fault("huge_manifest"):  # sparse: no disk is used
                     f.truncate(40 << 20)
     if fault("no_perm"):

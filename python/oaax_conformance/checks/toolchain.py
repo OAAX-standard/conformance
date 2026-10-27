@@ -366,7 +366,9 @@ def _converted(ctx):
     if ctx._picked is None:
         ctx._picked = _pick_model(ctx, run)
     rctx, path, why = ctx._picked
-    ctx.notes.append(f"the end-to-end tests judge the output file {Path(path).name} ({why})")
+    note = f"the end-to-end tests judge the output file {Path(path).name} ({why})"
+    if note not in ctx.notes:  # a check may ask for the converted model more than once
+        ctx.notes.append(note)
     return rctx, path
 
 

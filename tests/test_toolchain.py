@@ -612,3 +612,37 @@ def test_e2e_03_does_not_take_the_manifest_of_another_file_for_the_judged_ones_i
 def test_a_manifest_that_names_the_judged_file_still_counts(build_dir, mock_io_onnx, toolchain_images, tmp_path):
     results = _run(_context(build_dir, mock_io_onnx, CLEAN, None, tmp_path), ["E2E-03"])
     assert results["E2E-03"].outcome == "pass"
+
+
+# ---- round 7 (D3 addendum, D2) ------------------------------------------------------------------------------------------------------------------
+
+def test_big_files_are_not_hashed_and_a_change_is_still_seen(tmp_path):
+    """D3 addendum: tree() hashed every regular file: a sparse 16 GiB file cost 31 s, for each of ~15 conversions per run. Above 512 MiB size and mtime stand in."""
+    import os
+    import time
+
+    from oaax_conformance.toolchain import HASH_LIMIT, tree
+
+    with open(tmp_path / "big.bin", "wb") as f:
+        f.truncate(8 << 30)  # sparse: 8 GiB that hashing would read whole (about 15 s)
+    (tmp_path / "small.json").write_text("{}")
+    started = time.monotonic()
+    first = tree(tmp_path)
+    assert time.monotonic() - started < 5, "the sparse file was hashed"
+    assert first["big.bin"]["sha256"] is None and first["big.bin"]["size"] > HASH_LIMIT and "mtime_ns" in first["big.bin"]
+    assert len(first["small.json"]["sha256"]) == 64 and "mtime_ns" not in first["small.json"]
+    os.utime(tmp_path / "big.bin", ns=(1, 1))
+    assert tree(tmp_path)["big.bin"] != first["big.bin"]  # touched: input_changes() compares these dicts
+    with open(tmp_path / "big.bin", "ab") as f:
+        f.truncate(9 << 30)
+    assert tree(tmp_path)["big.bin"]["size"] == 9 << 30
+
+
+def test_a_manifest_that_names_a_link_is_not_valid_and_the_end_to_end_tests_agree(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """D2: validate() followed the link (TC-24 PASS) while the suite's listing does not: E2E ignored the manifest and judged another file."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "manifest_names_link", tmp_path), ["TC-24", "E2E-01", "E2E-02", "E2E-03"])
+    assert results["TC-24"].outcome in ("warn", "fail") and "model.lnk" in results["TC-24"].message and "a link" in results["TC-24"].message
+    assert results["E2E-01"].outcome == "pass"
+    assert [i for i, r in results.items() if r.outcome == "error"] == []
+    assert "(the only file)" in results["E2E-01"].note  # the unusable manifest is not used to choose, nor to describe, the file
+    assert results["E2E-03"].outcome != "pass"  # not judged against a manifest that does not describe the judged file

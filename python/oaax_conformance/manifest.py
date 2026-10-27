@@ -4,6 +4,8 @@
   validate(doc, dir=None) -> list of problems (empty = valid); with `dir`, also checks that model_file exists
 """
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -76,6 +78,15 @@ def _check_pair(where: str, onnx: dict, native: dict) -> list[str]:
     return problems
 
 
+def _kind_of(path: Path) -> str:
+    """'file', 'missing' or what else it is ('a link', 'a directory', 'a named pipe'...): looked at without following links."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return "missing"
+    return "file" if stat.S_ISREG(mode) else "a link" if stat.S_ISLNK(mode) else "a directory" if stat.S_ISDIR(mode) else "not a regular file"
+
+
 def validate(doc: dict, dir: str | None = None) -> list[str]:
     import jsonschema
 
@@ -91,8 +102,12 @@ def validate(doc: dict, dir: str | None = None) -> list[str]:
             if "onnx" in t:
                 problems += _check_view(f"{where}.onnx", t["onnx"])
                 problems += _check_pair(where, t["onnx"], t["native"])
-    if dir is not None and not (Path(dir) / doc["model_file"]).is_file():
-        problems.append(f"model_file '{doc['model_file']}' not found in {dir}")
+    if dir is not None:
+        kind = _kind_of(Path(dir) / doc["model_file"])
+        if kind == "missing":
+            problems.append(f"model_file '{doc['model_file']}' not found in {dir}")
+        elif kind != "file":  # lstat, like the suite's own listing of the output: a link is never followed, so it is not the model
+            problems.append(f"model_file '{doc['model_file']}' is {kind}, not a regular file")
     return problems
 
 

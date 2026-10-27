@@ -820,7 +820,7 @@ def test_docker_short_option_clusters_cannot_carry_an_unmasked_environment_value
     assert "sekret1" not in " ".join(report.mask_docker_args(args)) and "K=***".lower() in " ".join(report.mask_docker_args(args)).lower()
 
 
-@pytest.mark.parametrize("args", [["-u0"], ["-uroot"], ["-u", "0"], ["-tu", "0"], ["-itu0"], ["-u=0"], ["--user=0"], ["--user", "0"],
+@pytest.mark.parametrize("args", [["-u0"], ["-uroot"], ["-u", "0"], ["-tu", "0"], ["-Ptu0"], ["-u=0"], ["--user=0"], ["--user", "0"],
                                   ["-v/host:/x"], ["-v", "/host:/x"], ["-tv", "/host:/x"], ["--volume=/host:/x"], ["--mount", "type=bind,src=/h,dst=/x"],
                                   ["--net=host"], ["--network", "host"], ["--entrypoint=sh"], ["--read-only"], ["--privileged"], ["--rm"], ["--name=x"]])
 def test_every_spelling_of_a_flag_the_suite_sets_itself_is_refused(args, capsys):

@@ -57,6 +57,7 @@ def _digest(path: Path) -> str:
 
 MAX_TREE_DEPTH = 100  # a real toolchain output is a few files; a tree deeper than this, or with more entries, is not one the suite inspects
 MAX_TREE_ENTRIES = 100_000
+HASH_LIMIT = 512 << 20  # files above this are not hashed: tree() runs after every conversion (~15 per run)
 
 
 class TreeTooBig(Exception):
@@ -97,10 +98,13 @@ def tree(root: Path) -> dict[str, dict]:
         if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
             entry["link"] = os.readlink(path)
         elif stat.S_ISREG(st.st_mode):
-            try:
-                entry["sha256"] = _digest(path)
-            except OSError:
-                entry["sha256"] = None  # not readable by us: TC-22 reports it
+            if st.st_size > HASH_LIMIT:  # a compiled model is GB: hashing a sparse 16 GiB file took 31 s per conversion; size and mtime stand in for the hash
+                entry["sha256"], entry["mtime_ns"] = None, st.st_mtime_ns
+            else:
+                try:
+                    entry["sha256"] = _digest(path)
+                except OSError:
+                    entry["sha256"] = None  # not readable by us: TC-22 reports it
         entries[str(rel)] = entry
     return entries
 
