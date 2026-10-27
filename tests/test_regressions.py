@@ -809,3 +809,33 @@ def test_the_workspace_directories_of_the_suite_are_scrubbed_from_every_message(
     text = f"cannot read {base}/oaax-conformance-ab12cd34/out/result/model.bin and {base}/oaax-conformance-dump-ab12cd34/x and {base}/tmpab12cd34/y"
     cleaned = report.clean_text(text, [], [])
     assert "oaax-conformance-" not in cleaned and cleaned.count("<tmp>") == 3
+
+
+# ---- round 6: one reader for the docker arguments (C4 secrets in clusters, C9 forbidden flags in attached forms) ----------------------------------
+
+@pytest.mark.parametrize("args", [["-te", "K=sekret1"], ["-tek=sekret1"], ["-dte", "K=sekret1"], ["-ite=K=sekret1"], ["-ite", "K=sekret1"]])
+def test_docker_short_option_clusters_cannot_carry_an_unmasked_environment_value(args):
+    """C4: `-te K=v` (docker accepts it) returned unchanged from the masking and registered no secret."""
+    assert report.secret_values([], args) == ["sekret1"]
+    assert "sekret1" not in " ".join(report.mask_docker_args(args)) and "K=***".lower() in " ".join(report.mask_docker_args(args)).lower()
+
+
+@pytest.mark.parametrize("args", [["-u0"], ["-uroot"], ["-u", "0"], ["-tu", "0"], ["-itu0"], ["-u=0"], ["--user=0"], ["--user", "0"],
+                                  ["-v/host:/x"], ["-v", "/host:/x"], ["-tv", "/host:/x"], ["--volume=/host:/x"], ["--mount", "type=bind,src=/h,dst=/x"],
+                                  ["--net=host"], ["--network", "host"], ["--entrypoint=sh"], ["--read-only"], ["--privileged"], ["--rm"], ["--name=x"]])
+def test_every_spelling_of_a_flag_the_suite_sets_itself_is_refused(args, capsys):
+    """C9: only `--user` and `-u` as whole words were refused; `-u0` ran the toolchain as root after the suite's own --user, so TC-02 passed falsely."""
+    assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
+    assert "the suite sets this itself" in capsys.readouterr().err
+
+
+def test_a_cluster_that_cannot_be_read_with_certainty_is_refused(capsys):
+    assert cli.main(["toolchain", "x", "--docker-arg=-xe", "--docker-arg=K=v"]) == 3
+    assert "cannot tell which docker options" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("args", [["-it"], ["-e", "K=v", "--gpus=all"], ["-te", "K=v"], ["--cap-add=SYS_ADMIN"], ["-l", "a=b"], ["-l", "-u"]])  # the last: "-u" is the VALUE of -l, not an option
+def test_ordinary_docker_arguments_are_not_refused(args):
+    from oaax_conformance.dockerargs import unparseable, uses
+
+    assert unparseable(args) is None and uses(args, cli.FORBIDDEN_DOCKER_ARGS) is None

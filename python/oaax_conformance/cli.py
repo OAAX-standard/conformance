@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import __version__, html_report, report
+from .dockerargs import unparseable, uses
 from .harness import find_harness
 from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
@@ -136,11 +137,13 @@ def _validate(args) -> str | None:
             return f"--model-file {args.model_file}: must be a path inside the output directory"
         if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
             return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
-        for arg in args.docker_arg:
-            if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
-                return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
-            if arg.split("=", 1)[0] in FORBIDDEN_DOCKER_ARGS:
-                return f"--docker-arg {arg}: the suite sets this itself (a value here would change what the tests test)"
+        # One reader (dockerargs) for this and for the masking of secrets: every spelling docker accepts (-u0, -tu, -v/x:/y, --user=0, --user 0).
+        if unclear := unparseable(args.docker_arg):
+            return f"--docker-arg {unclear}: cannot tell which docker options this cluster of short flags is; spell each one separately (-e NAME=VALUE, -i, -t)"
+        if env_file := uses(args.docker_arg, ("--env-file",)):  # its values cannot be known, so they could not be kept out of the reports
+            return f"--docker-arg {env_file}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
+        if forced := uses(args.docker_arg, FORBIDDEN_DOCKER_ARGS):
+            return f"--docker-arg {forced}: the suite sets this itself (a value here would change what the tests test)"
     return None
 
 
