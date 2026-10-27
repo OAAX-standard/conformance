@@ -32,7 +32,7 @@ All of them are in `--help`.
 | `--input NAME:DTYPE:DIMS` | what the model takes (`?` = dynamic dimension). The suite otherwise reads an `oaax-manifest.json` next to the model, or the `.onnx` file itself; `--input` overrides both, which is also how to describe a runtime that takes another data type or layout than the ONNX model |
 | `--hardware-safe` | for real devices: 3 cycles instead of the full count, smaller floods, a pause between scenarios, and no abusive tests (NULL pointers, exit without `cleanup`, `cleanup` during a blocked call, request flood) |
 | `--workdir DIR` | run the harness in this directory |
-| `--harness PATH` (or `OAAX_HARNESS`) | a C harness built elsewhere |
+| `--harness PATH` (or `OAAX_HARNESS`) | override the C harness. Order: `--harness`, `OAAX_HARNESS`, the one inside the wheel, `./build/oaax-harness` of a checkout |
 
 `--hardware-safe` and memory growth: a check that passes on fewer cycles than its title says carries a `note` (console Details, JSON, JUnit, HTML).
 The two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and are `BLOCKED` with a hint otherwise, so a `--hardware-safe` run does not measure memory growth.
@@ -42,7 +42,7 @@ The two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and 
 | Option | What it does |
 | ------ | ------------ |
 | `--onnx FILE` | the model to convert (default: a small built-in one); it must be one this toolchain can convert |
-| `--runtime LIB` | enables the end-to-end tests; needs the C harness of a checkout |
+| `--runtime LIB` | enables the end-to-end tests (needs the `e2e` extra: `onnxruntime`) |
 | `--model-file NAME` | which output file is the model, relative to the output directory (see [model selection](#end-to-end-model-selection)) |
 | `--docker-arg ARG` | added to every `docker run`, e.g. `--docker-arg=--gpus=all` (see [the rules](#--docker-arg-rules)) |
 
@@ -82,7 +82,7 @@ The suite's own defaults on every conversion are `--cap-drop ALL`, `--security-o
 1. The suite converts a small built-in model (or `--onnx FILE`) in temporary directories, running your image as your user id with all capabilities dropped.
 2. It repeats the conversion as an arbitrary unprivileged user (TC-02), without network (TC-03), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output (TC-38). Network stays on in the other runs, because a toolchain that needs it is a finding, not a block.
 3. It runs hostile inputs: empty, garbage, truncated, missing, and a zip with `../` members.
-4. With `--runtime LIB` it loads the converted model in that runtime and compares the results with onnxruntime (`uv sync` has it; it needs the C harness of a checkout, so the wheel alone cannot run these tests).
+4. With `--runtime LIB` it loads the converted model in that runtime and compares the results with onnxruntime (the `e2e` extra has it; `uv sync` too).
 
 ### End-to-end model selection
 

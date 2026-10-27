@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- **C harness** (C11, CMake; Linux only for now: it uses `dlfcn` and `/proc`): the only code that touches a runtime. It runs fixed *scenarios* and prints one
+- **C harness** (C11, CMake; Linux only: it uses `dlfcn` and `/proc`; shipped inside the wheel): the only code that touches a runtime. It runs fixed *scenarios* and prints one
   JSON line per call (status, error text, timing, thread count, RSS), flushed after every call so a crash is attributable.
 - **Python orchestrator**: runs each scenario in its own process with a timeout (a crashing runtime is a failure, not a dead
   suite), holds **all assertions**, spec clauses and levels, runs the toolchain tier (Docker), compares with ONNX, writes the
@@ -21,7 +21,11 @@ harness/  python/oaax_conformance/  spec/2.0/  mock-runtime/  mock-toolchain/  t
 libraries and device nodes, and Windows DLLs cannot be tested from a Linux container; the toolchain tier starts Docker containers
 itself and must not need the host's Docker socket handed to another container.
 
-- A checkout (`uv sync`) or the wheel (`uv tool install`) of the Python package, plus the C harness built with CMake (`scripts/build.sh`) for the runtime tier. Linux x86_64 is the tested platform; Windows and aarch64 are not tested yet.
+- The wheel (`uv tool install 'oaax-conformance[e2e]'`) or a checkout (`uv sync` after `scripts/build.sh`). Both run every tier: the wheel carries the compiled harness.
+- **Wheel decision (2026-10-27):** one platform wheel per architecture (`py3-none-manylinux_2_17_*`, x86_64 and aarch64), the harness compiled by `hatch_build.py` (cmake) inside a manylinux_2_28 container.
+  The binary needs glibc 2.17 symbols only (`auditwheel show` checks it in CI), so it runs on Ubuntu 20.04 and newer and Debian 11 and newer.
+  cibuildwheel was not needed: it solves many Pythons and platforms, and this package has one binary and no Python ABI (`py3-none`).
+  An sdist builds (a pure wheel without cmake, with the harness when cmake exists) but is not released. Windows and macOS have no harness: the CLI says so (exit 3).
 - The toolchain tier needs Docker on the machine running the suite, because a toolchain *is* a Docker image.
 
 ## Direction for OAAX 2.1

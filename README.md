@@ -3,19 +3,18 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: 0.1.0, Linux only.** Every test is specified in [docs/tests/](docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
+> **Status: 0.1.0, Linux only.** Every test is specified in [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
 
 ## Quick start
 
-Needs `git`, [uv](https://docs.astral.sh/uv/), `cmake` and a C compiler (`sudo apt install build-essential cmake`); Docker for toolchains.
+Needs [uv](https://docs.astral.sh/uv/) on Linux (x86_64 or aarch64); Docker for toolchains. No compiler: the wheel contains the C harness.
 
 ```bash
-git clone https://github.com/OAAX-standard/conformance && cd conformance
-scripts/build.sh && uv sync                     # builds the C harness (into ./build) and the Python environment
+uv tool install --python 3.12 'oaax-conformance[e2e]'   # all tiers; or run once: uvx --python 3.12 --from 'oaax-conformance[e2e]' oaax-conformance ...
 
 # your own runtime or toolchain
-uv run oaax-conformance runtime ./libRuntimeLibrary.so --model FILE [--init-config key=value]... [--out DIR]
-uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--runtime ./libRuntimeLibrary.so] [--out DIR]
+oaax-conformance runtime ./libRuntimeLibrary.so --model FILE [--init-config key=value]... [--out DIR]
+oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--runtime ./libRuntimeLibrary.so] [--out DIR]
 ```
 
 No `--model`: the tests that send requests are `BLOCKED` and the run is `INCOMPLETE` (exit 2).
@@ -24,12 +23,14 @@ Open `report.html` in `--out` to see what each check did.
 ### Try it on the reference CPU runtime and toolchain
 
 ```bash
-mkdir -p /tmp/rt && curl -sSL https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz | tar xz -C /tmp/rt
-uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax_conformance/models/tiny-conv.onnx --out /tmp/report-rt   # ~20 s
+mkdir -p /tmp/rt && curl -sSL https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Ubuntu/library.tar.gz | tar xz -C /tmp/rt   # aarch64 machine: use aarch64 in the URL
+oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model @tiny-conv --out /tmp/report-rt   # ~20 s
 
 curl -sSL -o /tmp/oaax-cpu-toolchain.tar https://nbg1.your-objectstorage.com/oaax/conversion-toolchain/2.0.0/CPU/oaax-cpu-toolchain.tar && docker load -i /tmp/oaax-cpu-toolchain.tar   # ~800 MB
-uv run oaax-conformance toolchain oaax-cpu-toolchain:2.0.0 --runtime /tmp/rt/libRuntimeLibrary.so --out /tmp/report-tc   # ~30 s
+oaax-conformance toolchain oaax-cpu-toolchain:2.0.0 --runtime /tmp/rt/libRuntimeLibrary.so --out /tmp/report-tc   # ~30 s
 ```
+
+`@tiny-conv` is the small model the wheel ships. A minimal machine needs `libgomp1` (the reference runtime's own dependency) and `binutils` (`nm`, `readelf`, for `RT-S-02`, which is `BLOCKED` without them).
 
 **Exit code 1 is the expected result** for both: they have [known findings](#known-findings-on-the-reference-implementation).
 
@@ -60,7 +61,7 @@ The suite converts a small built-in model (or `--onnx FILE`) in temporary direct
 - **Hostile inputs**: empty, garbage, truncated, missing, a zip with `../` members.
 - **End to end** (`--runtime LIB`): loads the converted model in that runtime and compares the results with onnxruntime.
 
-More in [docs/reference.md](docs/reference.md#the-toolchain-tier).
+More in [docs/reference.md](https://github.com/OAAX-standard/conformance/blob/main/docs/reference.md#the-toolchain-tier).
 
 ### Levels
 
@@ -74,12 +75,13 @@ More in [docs/reference.md](docs/reference.md#the-toolchain-tier).
 
 | You want | Do | Covers |
 | -------- | -- | ------ |
-| Everything | a checkout: `scripts/build.sh && uv sync` (see Quick start) | all tiers |
-| Toolchain tier only | `uv tool install --python 3.12 oaax_conformance-X.Y.Z-py3-none-any.whl` | `toolchain IMAGE` without `--runtime` |
-| Reading `.onnx` files from the wheel | `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` | `--onnx`, the runtime tier's `--model` |
+| Everything | `uv tool install --python 3.12 'oaax-conformance[e2e]'` (PyPI) | all tiers |
+| The same from a release | `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl[e2e]'` (`aarch64` on an arm machine) | all tiers |
+| Less to download | the same without `[e2e]` | the toolchain tier and the runtime tier with `--input` (no `.onnx` reading, no end-to-end comparison) |
+| Development | a checkout: `scripts/build.sh && uv sync` | all tiers, [CONTRIBUTING](https://github.com/OAAX-standard/conformance/blob/main/CONTRIBUTING.md) |
 
-- The wheel needs Python 3.12 or newer (uv fetches it if your default is older).
-- The wheel does **not** contain the C harness: the runtime tier and the end-to-end tests (`toolchain IMAGE --runtime LIB`) need a checkout, or `--harness PATH` / `OAAX_HARNESS` pointing at a harness built elsewhere.
+- The wheel needs Python 3.12 or newer (uv fetches it if your default is older) and contains the C harness (Linux x86_64 and aarch64). `--harness PATH` or `OAAX_HARNESS` override it.
+- `e2e` adds `onnx` and `onnxruntime`: reading `.onnx` models (`--onnx`, the runtime tier's `--model`) and the end-to-end comparison.
 
 ## Reading the results
 
@@ -109,7 +111,7 @@ With `--out DIR` the suite writes:
 | `junit.xml` | CI | `failures` = failed; `errors` = crashed checks and MUSTs that could not run; `skipped` = other blocked checks and every n/a (with the reason); passed = pass + warn |
 
 Reports never contain the values of `--init-config` or of docker environment variables (values shorter than 3 characters excepted: the suite says so at the start), and directories are removed from every message
-([details](docs/reference.md#what-reports-keep-out)).
+([details](https://github.com/OAAX-standard/conformance/blob/main/docs/reference.md#what-reports-keep-out)).
 
 ## Known findings on the reference implementation
 
@@ -132,12 +134,12 @@ The reference CPU runtime and toolchain have known issues ([#45](https://github.
 
 ## More
 
-- [docs/reference.md](docs/reference.md): all options, what reports keep out, `--docker-arg` rules, how the toolchain tier works, disk use.
-- [docs/design.md](docs/design.md): architecture and direction for OAAX 2.1.
-- [docs/tests/](docs/tests/): the test specifications (under review).
-- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
+- [docs/reference.md](https://github.com/OAAX-standard/conformance/blob/main/docs/reference.md): all options, what reports keep out, `--docker-arg` rules, how the toolchain tier works, disk use.
+- [docs/design.md](https://github.com/OAAX-standard/conformance/blob/main/docs/design.md): architecture and direction for OAAX 2.1.
+- [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): the test specifications (under review).
+- [CONTRIBUTING.md](https://github.com/OAAX-standard/conformance/blob/main/CONTRIBUTING.md), [SECURITY.md](https://github.com/OAAX-standard/conformance/blob/main/SECURITY.md), [CHANGELOG.md](https://github.com/OAAX-standard/conformance/blob/main/CHANGELOG.md).
 - The suite tests itself against a mock runtime and a mock toolchain with injected faults: `uv run pytest`.
 
 ## License
 
-Apache 2.0, see [LICENSE](LICENSE).
+Apache 2.0, see [LICENSE](https://github.com/OAAX-standard/conformance/blob/main/LICENSE).

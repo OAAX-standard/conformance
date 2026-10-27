@@ -70,7 +70,7 @@ def test_the_release_workflow_keeps_its_guards():
     """The steps only run on a tag, so no pull request exercises them: a change that drops one must fail here."""
     text = (ROOT / ".github" / "workflows" / "build.yml").read_text()
     for needle in ("fetch-depth: 0", 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main', "release_notes.py", "--final", "--notes-file dist/release-notes.md",
-                   "gh release list", "overwrite: true", "scripts/smoke.sh"):
+                   "gh release list", "overwrite: true", "scripts/smoke.sh", "scripts/build-wheel.sh", "ubuntu-24.04-arm", "auditwheel show", "twine check", "SHA256SUMS"):
         assert needle in text, needle
     assert "| head" not in text and "| tee" not in text  # GitHub's default shell has no pipefail: a pipe hides the exit status
     assert "no-such-test" not in text

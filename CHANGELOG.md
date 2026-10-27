@@ -4,6 +4,8 @@
 
 First release.
 
+- Self-contained wheels for Linux x86_64 and aarch64: the compiled C harness is inside (`oaax_conformance/bin/oaax-harness`, built in a manylinux container, glibc 2.17 is enough), so `uv tool install 'oaax-conformance[e2e]'` runs every tier without a checkout, a compiler or cmake. `--harness` / `OAAX_HARNESS` stay as overrides; `--model @tiny-conv` is the model the wheel ships.
+- Published on PyPI as `oaax-conformance` (trusted publishing from the release's own wheels).
 - Runtime tiers (`static`, `lifecycle`, `model`): 62 checks against the C API of an OAAX 2.0 runtime, each with its spec clause and level (MUST / SHOULD / PROPOSED), run by a C harness (one scenario per process).
 - Toolchain tier (30 checks) and end-to-end tier (4): a Docker image (arguments, exit codes, log, no root, no network, read-only, hostile input), then convert, load, run and compare with onnxruntime.
 - Reports: console table, `report.html` (self-contained, prints to PDF), `report.json`, `junit.xml`; values of `--init-config` and directory names are never stored.
