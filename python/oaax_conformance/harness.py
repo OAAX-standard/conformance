@@ -38,7 +38,8 @@ def find_harness(explicit: str | None = None) -> str:
     for candidate in (os.environ.get("OAAX_HARNESS"), str(repo_build), shutil.which("oaax-harness")):
         if candidate and Path(candidate).is_file():
             return str(Path(candidate).resolve())
-    raise FileNotFoundError("oaax-harness not found: build it with scripts/build.sh, or pass --harness / set OAAX_HARNESS")
+    raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: in a checkout of the repository run scripts/build.sh; the wheel does not contain it. "
+                            "Run from that checkout, or pass --harness PATH or set OAAX_HARNESS")
 
 
 def _is_utf8(raw: bytes) -> bool:

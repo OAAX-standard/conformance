@@ -1,0 +1,61 @@
+name: build
+# Builds the wheel, checks it in a clean environment and keeps it as a workflow artifact.
+# A tag vX.Y.Z also creates a DRAFT GitHub Release with the wheel: a maintainer reviews and publishes it. Nothing is published to PyPI.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.13"
+      - name: Build the wheel (reproducible, timestamps fixed to the commit time)
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
+          uv build --wheel --out-dir dist
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+      - name: The tag must match the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(uv run --no-project python -c "import re,pathlib;print(re.search(r'__version__ = .(.+?).$', pathlib.Path('python/oaax_conformance/__init__.py').read_text(), re.M)[1])")
+          test "${GITHUB_REF_NAME}" = "v$version" || { echo "tag $GITHUB_REF_NAME != version $version"; exit 1; }
+      - name: Smoke test the wheel in a clean environment (the specs are inside, exit codes work)
+        run: |
+          wheel=$(ls dist/*.whl)
+          uvx --isolated --from "$wheel" oaax-conformance --help
+          uvx --isolated --from "$wheel" oaax-conformance --version
+          code=0; uvx --isolated --from "$wheel" oaax-conformance runtime /nonexistent.so || code=$?
+          test "$code" = 3 || { echo "expected exit code 3 for a missing library, got $code"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: oaax-conformance-${{ github.sha }}
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: oaax-conformance-${{ github.sha }}
+          path: dist
+      - name: Create a draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "Built by CI from commit $GITHUB_SHA. Verify downloads against SHA256SUMS. Draft: edit the notes (see CHANGELOG.md), then publish."

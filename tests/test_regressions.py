@@ -567,3 +567,11 @@ def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_di
 def test_pause_and_round_trip_timeout_must_be_finite_seconds(build_dir, option, value, capsys):
     assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", option, value]) == 3
     assert option in capsys.readouterr().err
+
+
+def test_version_is_printed_and_comes_from_one_place(capsys):
+    from oaax_conformance import __version__
+
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["--version"])
+    assert stop.value.code == 0 and f"oaax-conformance {__version__}" in capsys.readouterr().out

@@ -194,7 +194,6 @@ wheels = [
 
 [[package]]
 name = "oaax-conformance"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
@@ -229,7 +228,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-xdist", marker = "extra == 'test'" },
 ]
-provides-extras = ["test", "onnx", "e2e"]
+provides-extras = ["e2e", "onnx", "test"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "oaax-conformance", extras = ["test", "onnx", "e2e"] }]

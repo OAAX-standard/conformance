@@ -23,3 +23,8 @@ that makes it fail. The self-tests insist on all three.
 The toolchain self-tests build small mock toolchain images (`mock-toolchain/`) and need Docker; without it they are skipped. To build them from an
 image you already have instead of pulling `python:3.11-slim`, set `OAAX_MOCK_BASE` to any image that has python3 (for example the CPU toolchain).
 For a new toolchain test, add a fault to `mock-toolchain/mock_toolchain.py` and a case to `tests/test_toolchain.py`.
+
+## Releasing (maintainers)
+
+Set `__version__` in `python/oaax_conformance/__init__.py` (the one place) and move the `CHANGELOG.md` entry from "unreleased" to the version and date. Push a tag `vX.Y.Z` on `main`:
+the `build` workflow checks that the tag matches the version, builds and smoke-tests the wheel, and creates a **draft** GitHub Release for a maintainer to review and publish. Nothing goes to PyPI.
