@@ -517,3 +517,81 @@ def test_a_huge_model_never_makes_the_suite_read_it_into_memory(build_dir, mock_
     assert "E2E-04" in done.stdout and "ERROR" not in done.stdout.split("Details")[-1].split("Result")[0], done.stdout[-1500:]
     assert "GB: the suite does not read a model that big" in done.stdout.replace("\n", " ") or "GB" in done.stdout
     assert peak < 1500, f"peak memory {peak} MB"
+
+# ---- round 7 (D4): a failed or impossible copy leaves nothing behind, a deep or huge output tree is a clean BLOCKED ------------------------------
+
+def _deep_tree(root, levels):
+    import os
+
+    here = os.getcwd()
+    os.chdir(root)
+    try:
+        for _ in range(levels):
+            os.mkdir("d")
+            os.chdir("d")
+    finally:
+        os.chdir(here)
+
+
+@pytest.fixture
+def private_tmp(tmp_path, monkeypatch):
+    """tempfile creates the suite's workspaces here: what is left over after a run is visible (other tests running in parallel cannot interfere)."""
+    import tempfile
+
+    base = tmp_path / "tmp"
+    base.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(base))
+    return base
+
+
+def test_an_unreadable_file_blocks_tc08_and_leaves_no_workspace_behind(build_dir, mock_io_onnx, toolchain_images, tmp_path, private_tmp):
+    """D4: Workspace.with_output_of() created the copy, failed on a mode-000 file, and nobody ever removed it (it was registered with the context only in convert())."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "unreadable_file", tmp_path), ["TC-01", "TC-08"])
+    assert results["TC-01"].outcome == "pass"
+    assert results["TC-08"].outcome == "blocked" and "cannot copy" in results["TC-08"].message
+    assert sorted(p.name for p in private_tmp.iterdir()) == []
+
+
+def test_a_tree_of_1700_levels_is_a_clean_block_and_leaves_nothing_behind(build_dir, mock_io_onnx, toolchain_images, tmp_path, private_tmp):
+    """D4: TC-08's recursive copy raised RecursionError (ERROR, exit 4, "a bug of the suite") and the half-copied tree stayed."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "deep_tree", tmp_path), ["TC-01", "TC-08"])
+    assert [(i, r.message) for i, r in results.items() if r.outcome == "error"] == []
+    assert results["TC-01"].outcome == "blocked" and "deeper than 100 levels" in results["TC-01"].message
+    assert sorted(p.name for p in private_tmp.iterdir()) == []
+
+
+def test_the_walkers_are_iterative_and_capped(tmp_path):
+    from oaax_conformance import toolchain
+    from oaax_conformance.toolchain import TreeTooBig, Workspace, remove_tree, tree
+
+    ws = Workspace.create()
+    try:
+        _deep_tree(ws.out_dir, 1700)
+        with pytest.raises(TreeTooBig, match="deeper than 100 levels"):
+            tree(ws.out_dir)
+        toolchain._drop_big_files(ws.out_dir)  # best effort, never an exception
+        with pytest.raises(TreeTooBig):
+            Workspace.with_output_of(ws)
+    finally:
+        remove_tree(ws.root)  # 1700 levels, without recursion
+    assert not ws.root.exists()
+
+
+def test_a_normal_deep_tree_is_copied_and_the_entry_cap_applies(tmp_path, monkeypatch):
+    from oaax_conformance import toolchain
+    from oaax_conformance.toolchain import TreeTooBig, Workspace, remove_tree, tree
+
+    ws = Workspace.create()
+    try:
+        _deep_tree(ws.out_dir, 90)
+        (ws.out_dir / "a.json").write_text("{}")
+        copy = Workspace.with_output_of(ws)
+        try:
+            assert set(tree(copy.out_dir)) == set(tree(ws.out_dir)) and len(tree(copy.out_dir)) == 91
+        finally:
+            remove_tree(copy.root)
+        monkeypatch.setattr(toolchain, "MAX_TREE_ENTRIES", 50)
+        with pytest.raises(TreeTooBig, match="more than 50 entries"):
+            tree(ws.out_dir)
+    finally:
+        remove_tree(ws.root)

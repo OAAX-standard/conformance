@@ -7,7 +7,7 @@ from .. import manifest
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
 from ..safefile import MAX_JSON_BYTES, model_too_big, read_json
-from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, Workspace, follows_naming, make_hostile_zip
+from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, TreeTooBig, Workspace, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
 
@@ -77,7 +77,7 @@ def output_directory_may_exist(ctx):
     _succeeded(first, "the first conversion")
     try:
         copy = Workspace.with_output_of(first.workspace)
-    except OSError as e:
+    except (OSError, RecursionError, TreeTooBig) as e:
         raise Blocked(f"cannot copy the output of the first conversion to test a second one: {e}")
     _succeeded(ctx.convert("again", workspace=copy), "a second conversion into the same output directory")
 

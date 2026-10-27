@@ -175,6 +175,17 @@ def main(argv: list[str]) -> int:
     if fault("big_output"):  # a compiled model is big: a sparse 8 MiB file stands for it
         with open(os.path.join(out, "weights.bin"), "wb") as f:
             f.truncate(8 << 20)
+    if fault("unreadable_file"):  # a mode-000 file next to the model, owned by the uid that runs the suite
+        secret = os.path.join(out, "secret.dat")
+        open(secret, "w").write("x")
+        os.chmod(secret, 0)
+    if fault("deep_tree"):  # ~1700 nested directories: a host path of ~3.5 kB (below PATH_MAX) and far above any recursion limit
+        here = os.getcwd()
+        os.chdir(out)
+        for _ in range(1700):
+            os.mkdir("d")
+            os.chdir("d")
+        os.chdir(here)
     if fault("subdirs"):  # subdirectories created as the uid the container runs as
         os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
         open(os.path.join(out, "sub", "deep", "file"), "w").close()

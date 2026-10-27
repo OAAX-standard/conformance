@@ -55,12 +55,45 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+MAX_TREE_DEPTH = 100  # a real toolchain output is a few files; a tree deeper than this, or with more entries, is not one the suite inspects
+MAX_TREE_ENTRIES = 100_000
+
+
+class TreeTooBig(Exception):
+    """The output tree is deeper than MAX_TREE_DEPTH or has more than MAX_TREE_ENTRIES entries."""
+
+
+def walk(root: Path):
+    """(relative path, lstat) of every entry under `root`, parents before children, never following links. Iterative (a deep tree must not hit the recursion limit)
+    and capped: raises TreeTooBig instead of walking a million entries or two thousand levels."""
+    stack, count = [(root, 0)], 0
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError:
+            continue  # a directory we cannot list: the entry itself is reported, its content is not ours to judge
+        for entry in entries:
+            count += 1
+            if count > MAX_TREE_ENTRIES:
+                raise TreeTooBig(f"has more than {MAX_TREE_ENTRIES} entries")
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            yield Path(entry.path).relative_to(root), info
+            if entry.is_dir(follow_symlinks=False):
+                if depth + 1 > MAX_TREE_DEPTH:
+                    raise TreeTooBig(f"is deeper than {MAX_TREE_DEPTH} levels")
+                stack.append((Path(entry.path), depth + 1))
+
+
 def tree(root: Path) -> dict[str, dict]:
-    """Every file and directory under root: relative path -> size, mode, sha256 (files)."""
+    """Every file and directory under root: relative path -> size, mode, sha256 (files). TreeTooBig when it is not a normal output tree."""
     entries = {}
-    for path in sorted(root.rglob("*")):
-        st = path.lstat()
+    for rel, st in sorted(walk(root), key=lambda item: item[0].parts):
         entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid, "reg": stat.S_ISREG(st.st_mode)}
+        path = root / rel
         if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
             entry["link"] = os.readlink(path)
         elif stat.S_ISREG(st.st_mode):
@@ -68,7 +101,7 @@ def tree(root: Path) -> dict[str, dict]:
                 entry["sha256"] = _digest(path)
             except OSError:
                 entry["sha256"] = None  # not readable by us: TC-22 reports it
-        entries[str(path.relative_to(root))] = entry
+        entries[str(rel)] = entry
     return entries
 
 
@@ -91,25 +124,25 @@ class Workspace:
     def with_output_of(cls, other: "Workspace") -> "Workspace":
         """A new workspace whose output directory starts as a copy of `other`'s: a conversion into an existing output directory is tested on the
         copy, so a toolchain that cleans or renames what it finds there cannot change the files the end-to-end tests load later.
-        Only directories, regular files and links are copied (never open a FIFO)."""
+        Only directories, regular files and links are copied (never open a FIFO); a big file is a sparse placeholder of the same size. If the copy fails the new
+        directory is removed here: nothing has registered it with the context yet, so nobody else would."""
         ws = cls.create()
-
-        def copy(src: Path, dst: Path) -> None:
-            for entry in os.scandir(src):
-                target = dst / entry.name
-                if entry.is_symlink():
-                    os.symlink(os.readlink(entry.path), target)
-                elif entry.is_dir(follow_symlinks=False):
-                    target.mkdir()
-                    copy(Path(entry.path), target)
-                elif entry.is_file(follow_symlinks=False):
-                    if entry.stat(follow_symlinks=False).st_size > KEEP_BYTES:  # a compiled model is GB: the toolchain sees a file of that name and size, no disk is used
-                        with open(target, "wb") as f:
-                            f.truncate(entry.stat(follow_symlinks=False).st_size)
+        try:
+            for rel, info in walk(other.out_dir):
+                src, dst = other.out_dir / rel, ws.out_dir / rel
+                if stat.S_ISLNK(info.st_mode):
+                    os.symlink(os.readlink(src), dst)
+                elif stat.S_ISDIR(info.st_mode):
+                    dst.mkdir()
+                elif stat.S_ISREG(info.st_mode):
+                    if info.st_size > KEEP_BYTES:  # a compiled model is GB: the toolchain sees a file of that name and size, no disk is used
+                        with open(dst, "wb") as f:
+                            f.truncate(info.st_size)
                     else:
-                        shutil.copy2(entry.path, target)
-
-        copy(other.out_dir, ws.out_dir)
+                        shutil.copy2(src, dst)
+        except BaseException:
+            remove_tree(ws.root)
+            raise
         return ws
 
     def stage(self, filename: str, content: bytes) -> Path:
@@ -129,12 +162,32 @@ def _drop_big_files(directory: Path) -> None:
     """Delete the big files (compiled models are GB) of a finished conversion so disk use does not grow with the number of conversions.
     A file another uid created in a directory of its own cannot be removed here: close() opens those up and removes them at the end."""
     try:
-        for path in directory.rglob("*"):
+        for rel, info in walk(directory):
+            if rel.name not in (*LOG_NAMES, MANIFEST) and stat.S_ISREG(info.st_mode) and info.st_size > KEEP_BYTES:
+                try:
+                    (directory / rel).unlink()
+                except OSError:
+                    pass
+    except TreeTooBig:
+        pass  # best effort: close() removes the whole tree
+
+
+def remove_tree(path: Path) -> None:
+    """Remove a directory tree without recursion (a tree of 2000 levels is valid on disk) and without following links; errors are ignored, the caller checks."""
+    for root, dirs, files in os.walk(path, topdown=False, followlinks=False):
+        for name in files:
             try:
-                if path.name not in (*LOG_NAMES, MANIFEST) and path.is_file() and not path.is_symlink() and path.stat().st_size > KEEP_BYTES:
-                    path.unlink()
+                os.unlink(os.path.join(root, name))
             except OSError:
                 pass
+        for name in dirs:
+            full = os.path.join(root, name)
+            try:
+                os.unlink(full) if os.path.islink(full) else os.rmdir(full)
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
     except OSError:
         pass
 
@@ -333,9 +386,17 @@ class ToolchainContext:
             changes = [line[2:] for line in diff.splitlines() if line[:2] in ("A ", "C ")]
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
+        try:
+            after_in, after_out = tree(ws.in_dir), tree(ws.out_dir)
+        except TreeTooBig as e:  # the workspace is registered: close() removes it
+            why = f"the output of the conversion {e}: the suite does not inspect a tree like that"
+            self.timeouts[name] = why
+            if name == BASELINE:
+                self.timeouts[BASELINE] = why + ", so the other conversions are not tried"
+            raise Blocked(self.timeouts[name])
         secrets = self._secrets()  # scrubbed here, before any check cuts the text (to 200 characters, to its last 3000): a cut must never leave half of a secret
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(hide_secrets(out.decode(errors="replace"), secrets), ws),
-                         _redact(hide_secrets(err.decode(errors="replace"), secrets), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+                         _redact(hide_secrets(err.decode(errors="replace"), secrets), ws), ws, before, after_in, after_out, _result_path(args), changes)
         # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
         _drop_big_files(ws.in_dir)
         if name != BASELINE:  # also the TC-08 copy: a multi-GB model must never exist three times
@@ -394,15 +455,12 @@ class ToolchainContext:
         """Remove the temporary directories. A toolchain that creates subdirectories as another uid leaves some we cannot delete: open them up
         from a throwaway container of the same image (limited to that workspace), and report anything that still cannot be removed."""
         for ws in self.workspaces:
-            try:
-                shutil.rmtree(ws.root)
+            remove_tree(ws.root)
+            if not ws.root.exists():
                 continue
-            except OSError:
-                pass
             self._make_removable(ws)
-            try:
-                shutil.rmtree(ws.root)
-            except OSError:
+            remove_tree(ws.root)
+            if ws.root.exists():
                 self.leftovers.append(str(ws.root))
         self.workspaces.clear()
         for dump in self._dumps:
