@@ -653,3 +653,22 @@ def test_an_init_slower_than_the_budget_blocks_the_checks_that_need_it(build_dir
     """RT-L-07 and RT-M-02 run init many times: a runtime that takes minutes to start is BLOCKED (raise --timeout), never FAILED."""
     results = _run(build_dir, "hang_init", ["RT-L-07", "RT-M-02"], monkeypatch, timeout=5)
     assert {i: r.outcome for i, r in results.items()} == {"RT-L-07": "blocked", "RT-M-02": "blocked"}
+
+
+# ---- round 5, A4-A6: install instructions the user can follow --------------------------------------------------------------------------
+
+def test_no_message_or_doc_tells_the_user_to_pip_install():
+    """A6: the package is not on PyPI, so `pip install oaax-conformance` would install whatever squats that name, and uv tool environments have no pip."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    files = [*(root / "python").rglob("*.py"), root / "README.md", root / "CONTRIBUTING.md", root / "docs" / "design.md"]
+    assert [str(f.relative_to(root)) for f in files if "pip install" in f.read_text()] == []
+
+
+def test_the_readme_gives_the_python_the_wheel_needs():
+    """A4: `uv tool install` of the wheel fails on a default Python 3.11 unless told `--python 3.12` (requires-python is >=3.12)."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "uv tool install --python 3.12 oaax_conformance" in readme and "[e2e]" not in readme

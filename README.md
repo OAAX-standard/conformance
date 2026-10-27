@@ -44,8 +44,10 @@ scripts/build.sh                       # builds the C harness of the runtime tie
 uv sync                                # creates .venv; uv run oaax-conformance --version
 ```
 
-The wheel of a release (`uv tool install oaax_conformance-X.Y.Z-py3-none-any.whl`) is enough for the **toolchain** tier. It does not contain the C harness, so the **runtime** tier
-needs a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere).
+The wheel of a release needs Python 3.12 or newer: `uv tool install --python 3.12 oaax_conformance-X.Y.Z-py3-none-any.whl` (uv fetches that Python if your default is older).
+It is enough for the **toolchain** tier without `--runtime`. It does not contain the C harness, so the **runtime** tier and the end-to-end toolchain tests (`toolchain IMAGE --runtime LIB`)
+need a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere). Reading `.onnx` models (`--onnx`, the runtime tier's `--model`) needs the `onnx` extra:
+`uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'`; a checkout has it after `uv sync`.
 
 ## Usage
 
@@ -119,7 +121,7 @@ uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.on
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
 image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
 with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
-(`uv sync` has it; with the wheel install the `e2e` extra: `uv tool install "oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]"`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
+(`uv sync` has it, and it needs the C harness of a checkout; the wheel alone cannot run these tests, see Install). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 

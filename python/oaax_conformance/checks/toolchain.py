@@ -186,7 +186,8 @@ def manifest_matches_the_model(ctx):
     try:
         original = manifest.derive_io(ctx.onnx_path)
     except ImportError:
-        raise Blocked("reading the ONNX model needs the onnx extra: pip install oaax-conformance[onnx]")
+        raise Blocked("reading the ONNX model needs "
+                      "the onnx extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` with the wheel")
     problems = []
     for kind in ("inputs", "outputs"):
         want = {t["name"]: t["onnx"] for t in original[kind]}
@@ -393,7 +394,8 @@ def io_is_retained(ctx):
         converted = _io_views(path, doc)
         original = _io_views(ctx.onnx_path, None)
     except ImportError:
-        raise Blocked("reading ONNX models needs the onnx extra: pip install oaax-conformance[onnx]")
+        raise Blocked("reading ONNX models needs "
+                      "the onnx extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` with the wheel")
     if converted is None:
         raise NotApplicable("the converted model is not ONNX and has no manifest: its I/O cannot be read")
     problems = []
@@ -412,7 +414,8 @@ def same_results(ctx):
         import numpy as np
         import onnxruntime
     except ImportError:
-        raise Blocked("needs the e2e extra: pip install oaax-conformance[e2e]")
+        raise Blocked("needs "
+                      "the e2e extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]'` with the wheel")
     from ..reference import deterministic_input
 
     doc = _manifest_doc(_valid(ctx))

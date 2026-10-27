@@ -83,7 +83,7 @@ def _from_onnx(model: Path) -> ModelIO:
     try:
         import onnx
     except ImportError:
-        raise NoModelIO("cannot read the ONNX model: pip install oaax-conformance[onnx], or use --input")
+        raise NoModelIO("cannot read the ONNX model: install the onnx extra (README, Install), or use --input")
     try:
         graph = onnx.load(str(model), load_external_data=False).graph
     except Exception as e:  # noqa: BLE001 - a missing file, a protobuf error: all mean "cannot read it"
