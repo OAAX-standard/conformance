@@ -799,3 +799,13 @@ def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path
     assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
     err = capsys.readouterr().err.strip()
     assert re.search(cause, err) and "LD_LIBRARY_PATH" not in err and len(err.splitlines()) == 1 and "BLOCKED" not in err
+
+
+def test_the_workspace_directories_of_the_suite_are_scrubbed_from_every_message(tmp_path):
+    """C2: the regex matched mkdtemp's default `tmpXXXX` only, so our own `oaax-conformance-XXXX` workspaces leaked into the reports."""
+    import tempfile
+
+    base = tempfile.gettempdir()
+    text = f"cannot read {base}/oaax-conformance-ab12cd34/out/result/model.bin and {base}/oaax-conformance-dump-ab12cd34/x and {base}/tmpab12cd34/y"
+    cleaned = report.clean_text(text, [], [])
+    assert "oaax-conformance-" not in cleaned and cleaned.count("<tmp>") == 3

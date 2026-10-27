@@ -82,7 +82,7 @@ DISCLAIMER = "This run covers only the approved tests; it is not a full conforma
 
 # Everything XML 1.0 cannot hold (C0, U+FFFE/FFFF, lone surrogates) plus what can hijack a terminal or reorder text (C1 incl. CSI, bidi overrides).
 _CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff\ufffe\uffff]")
-_SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/tmp\w{6,}")  # the scenario's own working directory (no --workdir) and our workspaces
+_SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/(?:tmp\w{6,}|oaax-conformance-(?:dump-)?\w{6,})")  # the scenario's own working directory (no --workdir) and our workspaces
 MAX_TEXT = 20000  # a runtime can return megabytes of error text
 
 

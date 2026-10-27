@@ -5,6 +5,7 @@ names a fault: every toolchain check must fail on its fault and pass on the clea
 runtime loads), logs.json and oaax-manifest.json. Usage: mock_toolchain.py <input.onnx> <output-directory>"""
 import json
 import os
+import shutil
 import socket
 import sys
 import time
@@ -143,6 +144,11 @@ def main(argv: list[str]) -> int:
         return fail(out, problem)
     if fault("not_idempotent") and os.path.isdir(out) and os.listdir(out):
         return fail(out, "the output directory is not empty")
+    if fault("wipe_second") and os.path.isdir(out) and os.listdir(out):  # a "clean the output directory first" toolchain that then names its file differently
+        shutil.rmtree(out)
+        model_name_override = "other.bin"
+    else:
+        model_name_override = None
     if fault("no_mkdir") and not os.path.isdir(out):
         return fail(out, "the output directory does not exist")
     try:
@@ -151,7 +157,7 @@ def main(argv: list[str]) -> int:
         return 0 if fault("unwritable_ok") else fail(out, f"cannot create the output directory: {e}")
     if fault("writes_input_dir"):
         open(path + ".cache", "w").close()
-    model_name = "model.hef" if fault("vendor_format") else "model.bin"  # a vendor format, and (see below) no manifest to describe it
+    model_name = model_name_override or ("model.hef" if fault("vendor_format") else "model.bin")  # a vendor format, and (see below) no manifest to describe it
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)

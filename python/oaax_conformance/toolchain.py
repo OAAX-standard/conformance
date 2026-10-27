@@ -87,6 +87,27 @@ class Workspace:
             d.chmod(0o777)  # any uid the container runs as may write here
         return cls(root, in_dir, out_dir)
 
+    @classmethod
+    def with_output_of(cls, other: "Workspace") -> "Workspace":
+        """A new workspace whose output directory starts as a copy of `other`'s: a conversion into an existing output directory is tested on the
+        copy, so a toolchain that cleans or renames what it finds there cannot change the files the end-to-end tests load later.
+        Only directories, regular files and links are copied (never open a FIFO)."""
+        ws = cls.create()
+
+        def copy(src: Path, dst: Path) -> None:
+            for entry in os.scandir(src):
+                target = dst / entry.name
+                if entry.is_symlink():
+                    os.symlink(os.readlink(entry.path), target)
+                elif entry.is_dir(follow_symlinks=False):
+                    target.mkdir()
+                    copy(Path(entry.path), target)
+                elif entry.is_file(follow_symlinks=False):
+                    shutil.copy2(entry.path, target)
+
+        copy(other.out_dir, ws.out_dir)
+        return ws
+
     def stage(self, filename: str, content: bytes) -> Path:
         path = self.in_dir / filename
         path.write_bytes(content)

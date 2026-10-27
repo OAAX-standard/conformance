@@ -6,7 +6,7 @@ from pathlib import Path
 from .. import manifest
 from ..modelio import NoModelIO, discover
 from ..registry import Blocked, Fail, NotApplicable, Warn, check
-from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, follows_naming, make_hostile_zip
+from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, Workspace, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
 
@@ -74,7 +74,11 @@ def output_directory_is_created(ctx):
 def output_directory_may_exist(ctx):
     first = _valid(ctx)
     _succeeded(first, "the first conversion")
-    _succeeded(ctx.convert("again", workspace=first.workspace), "a second conversion into the same output directory")
+    try:
+        copy = Workspace.with_output_of(first.workspace)
+    except OSError as e:
+        raise Blocked(f"cannot copy the output of the first conversion to test a second one: {e}")
+    _succeeded(ctx.convert("again", workspace=copy), "a second conversion into the same output directory")
 
 
 @check("TC-09")

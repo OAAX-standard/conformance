@@ -1,5 +1,6 @@
 """The toolchain tier tests itself: the clean mock toolchain passes everything, every check fails on its own fault.
 Needs Docker (the mock toolchain is an image); skipped without it."""
+import shutil
 import subprocess
 import time
 
@@ -336,3 +337,35 @@ def test_a_toolchain_that_hangs_on_a_valid_model_costs_one_timeout_not_one_per_c
     assert time.monotonic() - started < 12  # one 4 s timeout, not six
     assert {r.outcome for r in results.values()} == {"blocked"}
     assert "the other conversions are not tried" in results["TC-02"].message and "--timeout" in results["TC-30"].message
+
+
+# ---- round 6 --------------------------------------------------------------------------------------------------------------------------
+
+def test_a_toolchain_that_cleans_its_output_directory_does_not_break_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """C1: TC-08 converted a second time into the baseline's own output directory; a toolchain that wipes and renames what it finds there made
+    E2E-01 FAIL (MUST) on a model that had loaded fine. TC-08 now works on a copy."""
+    ids = ["TC-01", "TC-08", "E2E-01", "E2E-02", "E2E-03", "E2E-04"]
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "wipe_second", tmp_path), ids)
+    assert {i: (r.outcome, r.message) for i, r in results.items() if r.outcome != "pass"} == {}
+
+
+def test_the_copy_of_an_output_directory_keeps_files_and_links_and_never_opens_a_fifo(tmp_path):
+    import os
+
+    from oaax_conformance.toolchain import Workspace
+
+    first = Workspace.create()
+    try:
+        (first.out_dir / "result").mkdir()
+        (first.out_dir / "result" / "model.bin").write_bytes(b"MODEL")
+        os.symlink("model.bin", first.out_dir / "result" / "link")
+        os.mkfifo(first.out_dir / "result" / "pipe")  # copying this by opening it would block forever
+        copy = Workspace.with_output_of(first)
+        try:
+            assert (copy.out_dir / "result" / "model.bin").read_bytes() == b"MODEL"
+            assert os.readlink(copy.out_dir / "result" / "link") == "model.bin"
+            assert not (copy.out_dir / "result" / "pipe").exists()
+        finally:
+            shutil.rmtree(copy.root)
+    finally:
+        shutil.rmtree(first.root)
