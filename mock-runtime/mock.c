@@ -145,6 +145,7 @@ static void drop_queue(void) {
 
 EXPORT RuntimeStatus runtime_cleanup(void) {
   if (fault("crash_in_cleanup")) raise(SIGSEGV);
+  if (queued && fault("slow_cleanup")) sleep_ms(1200);  // the spec sets no bound for cleanup: slow is not wrong
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
   if (!initialized && cleaned_once && fault("cleanup_twice_fails")) return fail(RUNTIME_STATUS_ERROR, "already cleaned up");
   pthread_mutex_lock(&lock);
@@ -370,6 +371,8 @@ EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_ten
   }
   if (!initialized) return not_initialized();
   if (timeout_ms == 0 && fault("retrieve0_blocks")) sleep_ms(300);
+  static int hiccup_done;  // fault retrieve0_hiccup: the first idle retrieve_output(0) is delayed once (a scheduling hiccup of a loaded host)
+  if (timeout_ms == 0 && !head && !hiccup_done && fault("retrieve0_hiccup")) hiccup_done = 1, sleep_ms(300);
   double started = now_ms(), deadline = timeout_ms > 0 ? started + timeout_ms : 0;
   int gen = generation;
   pthread_mutex_lock(&lock);

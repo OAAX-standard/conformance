@@ -12,6 +12,10 @@ class Blocked(Exception):
     """The check could not run (library did not load, init failed, ...); not a verdict on the runtime."""
 
 
+class Warn(Exception):
+    """The check passed, but something is worth a look; the spec sets no bound that would make it a failure (for example: how long cleanup took)."""
+
+
 class NotApplicable(Exception):
     """The model or runtime has nothing this check could test (for example one input: no "missing input" case)."""
 

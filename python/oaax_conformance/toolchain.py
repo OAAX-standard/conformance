@@ -60,7 +60,7 @@ def tree(root: Path) -> dict[str, dict]:
     entries = {}
     for path in sorted(root.rglob("*")):
         st = path.lstat()
-        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid}
+        entry = {"size": st.st_size, "mode": oct(st.st_mode & 0o7777), "dir": stat.S_ISDIR(st.st_mode), "uid": st.st_uid, "reg": stat.S_ISREG(st.st_mode)}
         if stat.S_ISLNK(st.st_mode):  # never followed: it may point at a host file the toolchain has no business with
             entry["link"] = os.readlink(path)
         elif stat.S_ISREG(st.st_mode):
@@ -92,6 +92,26 @@ class Workspace:
         path.write_bytes(content)
         path.chmod(0o644)
         return path
+
+
+KEEP_BYTES = 1 << 20
+# Every conversion, not only the ones that repeat the run under a restriction: a toolchain is an image we did not write.
+HARDENING = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096"]
+BASELINE = "valid"  # the conversion every other result is judged against
+
+
+def _drop_big_files(directory: Path) -> None:
+    """Delete the big files (compiled models are GB) of a finished conversion so disk use does not grow with the number of conversions.
+    A file another uid created in a directory of its own cannot be removed here: close() opens those up and removes them at the end."""
+    try:
+        for path in directory.rglob("*"):
+            try:
+                if path.name not in (*LOG_NAMES, MANIFEST) and path.is_file() and not path.is_symlink() and path.stat().st_size > KEEP_BYTES:
+                    path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 @dataclass
@@ -126,7 +146,8 @@ class Conversion:
         """Files of the result directory, relative to it."""
         prefix = str(Path(self.out_path).relative_to("/output"))
         prefix = "" if prefix == "." else prefix + "/"
-        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and not v["dir"] and "link" not in v}
+        # Regular files only: a FIFO, socket or device the toolchain left would block or fool whoever opens it.
+        return {k[len(prefix):]: v for k, v in self.output.items() if k.startswith(prefix) and v["reg"]}
 
     def log_files(self) -> list[str]:
         return [n for n in self.files() if n in LOG_NAMES]
@@ -189,6 +210,8 @@ class ToolchainContext:
     _inspect: dict | None = None
     _dump: str | None = None
     progress: bool = False  # print each conversion to stderr as it starts
+    model_file: str | None = None  # --model-file: which output file is the model
+    candidates: list = field(default_factory=list)  # the output files that were tried as the model (E2E)
 
     def runtime_context(self, model_path: str):
         """A runtime Context for the converted model (E2E tests); None if no --runtime was given."""
@@ -214,6 +237,7 @@ class ToolchainContext:
                 ro_output: bool) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", f"oaax-conformance-{uuid.uuid4().hex[:12]}"]
         cmd += ["--user", user or f"{os.getuid()}:{os.getgid()}"]
+        cmd += HARDENING  # in front of --docker-arg: a toolchain that really needs a capability gets it with --docker-arg=--cap-add=..., and that is a finding to report
         if not network:
             cmd += ["--network", "none"]
         if read_only_rootfs:
@@ -229,6 +253,8 @@ class ToolchainContext:
             raise Blocked(self.docker_failure)
         if name in self.timeouts:
             raise Blocked(self.timeouts[name])
+        if BASELINE in self.timeouts:  # the image hangs on a valid model: trying the other ~15 conversions would cost 15 more timeouts
+            raise Blocked(self.timeouts[BASELINE])
         if name in self._runs:
             return self._runs[name]
         if self.progress:
@@ -277,8 +303,19 @@ class ToolchainContext:
         shown = [c.replace(str(ws.in_dir), "<in>").replace(str(ws.out_dir), "<out>") for c in cmd]
         run = Conversion(name, shown, code, timed_out, round((time.monotonic() - started) * 1000), _redact(out.decode(errors="replace"), ws),
                          _redact(err.decode(errors="replace"), ws), ws, before, tree(ws.in_dir), tree(ws.out_dir), _result_path(args), changes)
+        # Later checks read the snapshot above and small files (logs, manifest); only the first valid conversion's model is loaded again (E2E).
+        _drop_big_files(ws.in_dir)
+        if name != "valid" and workspace is None:
+            _drop_big_files(ws.out_dir)
         if timed_out:  # the spec sets no time limit: what a stalled run did or did not leave behind proves nothing, for any check
             self.timeouts[name] = f"a conversion did not finish within {self.timeout} s (the spec sets no limit): raise --timeout if the model is just big"
+            if name == BASELINE:
+                self.timeouts[BASELINE] = (f"the conversion of a valid model did not finish within {self.timeout} s (the spec sets no limit), so the other conversions "
+                                           "are not tried: raise --timeout if the model is just big")
+                if self.progress:
+                    import sys
+
+                    print(f"  {self.timeouts[BASELINE]}", file=sys.stderr, flush=True)
             raise Blocked(self.timeouts[name])
         self._runs[name] = run
         if code == DOCKER_ERROR and not out and b"docker" in err.lower():  # docker's own failure (bad --docker-arg, daemon, GPU runtime): a rejection by the toolchain looks different

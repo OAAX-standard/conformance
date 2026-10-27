@@ -23,8 +23,8 @@ Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker
 | `runtime/static` | the `.so` / `.dll` only | exported symbols, getters, calls before `init` |
 | `runtime/lifecycle` | a working `init` (device, or the CPU runtime) | `init`/`cleanup` rules, error text, cycles, threads, unload, memory, exit |
 | `runtime/model` | a model the runtime can load (+ the device) | enqueue/retrieve, id echo, multi-model routing, timeouts, concurrency, input validation, leaks |
-| `toolchain` | the Docker image | arguments, exit codes, log and manifest, no root / no network, output integrity, hostile input |
-| `e2e` | both | convert, load, run, compare with the ONNX reference within the declared precision |
+| `toolchain` | the Docker image | arguments, exit codes, log and manifest, runs without root / without network / read-only, output integrity, hostile input |
+| `e2e` | both | convert, load, run, compare with the ONNX reference (`rtol 1e-4`, `atol 1e-5`, a fixed tolerance: no precision is declared yet) |
 
 ## Test levels
 
@@ -44,8 +44,10 @@ scripts/build.sh                       # builds the C harness of the runtime tie
 uv sync                                # creates .venv; uv run oaax-conformance --version
 ```
 
-The wheel of a release (`uv tool install oaax_conformance-X.Y.Z-py3-none-any.whl`) is enough for the **toolchain** tier. It does not contain the C harness, so the **runtime** tier
-needs a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere).
+The wheel of a release needs Python 3.12 or newer: `uv tool install --python 3.12 oaax_conformance-X.Y.Z-py3-none-any.whl` (uv fetches that Python if your default is older).
+It is enough for the **toolchain** tier without `--runtime`. It does not contain the C harness, so the **runtime** tier and the end-to-end toolchain tests (`toolchain IMAGE --runtime LIB`)
+need a checkout (`--harness PATH` or `OAAX_HARNESS` point to a harness built elsewhere). Reading `.onnx` models (`--onnx`, the runtime tier's `--model`) needs the `onnx` extra:
+`uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'`; a checkout has it after `uv sync`.
 
 ## Usage
 
@@ -65,7 +67,7 @@ uv run oaax-conformance runtime /tmp/rt/libRuntimeLibrary.so --model python/oaax
 The CPU runtime loads any `.onnx` file, here the small model shipped with the suite. For a real device pass a model in the format that runtime loads (the output of its toolchain).
 This runtime has known findings (issues
 [#45](https://github.com/OAAX-standard/reference-implementation/issues/45) to [#49](https://github.com/OAAX-standard/reference-implementation/issues/49)),
-so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-20`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost),
+so exit code 1 is the **expected** result: `RT-L-11` WARN (exit without `cleanup` crashes), `RT-M-19`, `-21`, `-23`, `-25` FAIL (requests that do not match the model are accepted and lost; `RT-M-20`, `-22` and `-24` are N/A with this model: one input, nothing to leave out),
 `RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` WARN, `RT-M-17` BLOCKED (the tiny model answers faster than the suite can time). `RT-M-35` (memory growth over init/load/cleanup cycles, #47) is an RSS measurement:
 it shows with some models (a 1 MB face detector grows 12 MB) and not with others, so a PASS there is weaker than a FAIL. Open `report.html` in `--out` to see what each check did.
 
@@ -83,8 +85,10 @@ Useful options (all in `--help`): `--model FILE` is a model the runtime can load
 to know what the model takes: it reads an `oaax-manifest.json` next to the model or the `.onnx` file itself, and `--input NAME:DTYPE:DIMS` (use `?` for
 a dynamic dimension) overrides both, which is also how to describe a runtime that takes another data type or layout than the ONNX model. `--timeout`
 (seconds per scenario, default 300) and `--round-trip-timeout` are for slow devices: loops stop at 60% of the timeout, and a call still running at the
-limit is `BLOCKED`, not failed. `--skip ID` leaves a test out; `--hardware-safe` shrinks cycles and floods, pauses between scenarios and skips the
-deliberately abusive tests (NULL pointers, exit without cleanup, cleanup during a blocked call, request flood). `--workdir DIR` runs the harness in a given
+limit is `BLOCKED`, not failed. `--skip ID` leaves a test out; `--hardware-safe` shrinks cycles (3) and floods, pauses between scenarios and skips the
+deliberately abusive tests (NULL pointers, exit without cleanup, cleanup during a blocked call, request flood). A check that passes on fewer cycles than its title says carries a
+`note` (console Details, JSON, JUnit, HTML); the two memory-growth checks (`RT-L-10`, `RT-M-35`) need at least 10 cycles and are `BLOCKED` with a hint otherwise, so a `--hardware-safe` run does not
+measure memory growth. `--workdir DIR` runs the harness in a given
 directory; `--quiet` hides the progress lines on stderr.
 
 Three outputs: a **text summary** on the console (a table, one row per test), and with `--out DIR`:
@@ -92,12 +96,12 @@ Three outputs: a **text summary** on the console (a table, one row per test), an
 - `report.html`: a self-contained page (works offline) with the verdict, the expected behaviour and spec clause of each test, what was observed,
   and every call the harness made. Print it to PDF from the browser: the print layout opens every section.
 - `report.json`: everything in the page, for tools and archiving (library sha256, platform, per-test result with evidence, full call transcripts).
-  Values given to `--init-config` or `docker -e` are never stored, and directories are removed from every message.
+  Values given to `--init-config` or as docker environment variables (`-e`, `--env`, in any spelling, also `-e NAME` taken from your environment) are never stored, and directories are removed from every message. Other docker flags (`--label`, `--add-host`...) are shown as given, so keep secrets out of them; `--env-file` is refused.
 - `junit.xml`: for CI.
 
 Exit codes of both commands: `0` no MUST check failed; `1` a MUST failed; `2` nothing failed but a MUST check could not run or was skipped with `--skip` or `--hardware-safe` (INCOMPLETE: for
 example `init` needs vendor keys, pass them with `--init-config`); `3` bad command line, missing file, Docker or image; `4` a check of the suite itself
-crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. The suite tests itself against a mock runtime and a mock toolchain with
+crashed (a bug of the suite: please report it). `130`, `143`, `129`: stopped by Ctrl-C, SIGTERM or SIGHUP (the harness and any containers are stopped first). Failures name the spec clause. With `--only` the console says "Only N of M approved checks were selected" and the JSON (`summary.checks_selected`) and JUnit (`checks_selected` property) record it; the exit code only covers the checks that ran. The suite tests itself against a mock runtime and a mock toolchain with
 injected faults: `uv run pytest`.
 
 ### Toolchains
@@ -113,13 +117,13 @@ The reference CPU toolchain also has known findings ([#49](https://github.com/OA
 General form:
 
 ```bash
-uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value] [--docker-arg ARG]... [--out DIR]
+uv run oaax-conformance toolchain oaax-<vendor>-toolchain:<tag> [--onnx model.onnx] [--runtime ./libRuntimeLibrary.so --init-config key=value [--model-file NAME]] [--docker-arg ARG]... [--out DIR]
 ```
 
 Needs Docker. The suite converts a small built-in model (or `--onnx FILE`, a model this toolchain can convert) in temporary directories, runs the
-image as an arbitrary unprivileged user, without network, with read-only mounts and on hostile inputs (empty, garbage, truncated, missing, a zip
-with `../` members). With `--runtime LIB` it then loads the converted model in that runtime and compares the results with onnxruntime
-(`uv sync` has it; with the wheel install the `e2e` extra: `uv tool install "oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]"`). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB): leave the disk some room. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
+image with all capabilities dropped (`--cap-drop ALL`, `no-new-privileges`, a process limit; `--docker-arg` can override), then repeats the conversion as an arbitrary unprivileged user (TC-02), without network (TC-03), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output (TC-38); network stays on in the other runs, because a toolchain that needs it is a finding, not a block. It also runs on hostile inputs (empty, garbage, truncated, missing, a zip
+with `../` members). With `--runtime LIB` it then loads the converted model in that runtime (a 2.0 toolchain has no manifest naming it: if it writes several files besides its log, the suite tries each and the one the runtime loads is the model; `--model-file NAME`, relative to the output directory, names it explicitly) and compares the results with onnxruntime
+(`uv sync` has it, and it needs the C harness of a checkout; the wheel alone cannot run these tests, see Install). `--docker-arg` adds arguments to every `docker run`, e.g. `--docker-arg=--gpus=all`. The suite keeps only the tail of what a toolchain or runtime prints, but does not cap the files a toolchain writes to its output directory (compiled models can be several GB). Each conversion works in a temporary directory under `$TMPDIR` (point it at a disk with room); the big files of a conversion are deleted as soon as it is done, except those of the first valid conversion (the end-to-end tests load it), so plan for about two to three times the size of your model. After a run, if the toolchain left files it owns that the suite cannot delete, the suite runs the same image once more as root with `--network none`, mounting only that workspace, to `chmod` them (an image without `chmod` leaves the directory; the suite then lists it).
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/tests/](docs/tests/) for the test specifications (under review).
 

@@ -3,7 +3,7 @@ from oaax_conformance.suite import Context, run_suite
 
 
 def context(build_dir, variant="mock_runtime", init_config=("vendor_key=1",), model=True, **overrides):
-    values = dict(settle_ms=500, timeout=60, cycles=5, flood=100, requests=60, producers=3, per_producer=10, model_cycles=3, lost_after_ms=400,
+    values = dict(settle_ms=500, timeout=60, cycles=12, flood=100, requests=60, producers=3, per_producer=10, model_cycles=10, lost_after_ms=400,
                   retrieve_timeout_ms=1500, warmup_ms=3000)
     values.update(overrides)
     return Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model") if model else None, **values)

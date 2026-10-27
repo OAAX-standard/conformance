@@ -1,5 +1,6 @@
 """One regression test per finding of the adversary reviews (A1.. = round 1), each driven by a fault of the mock runtime or toolchain."""
 import json
+import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -248,7 +249,8 @@ def test_a_library_that_is_not_elf_does_not_pass_the_export_check(tmp_path, buil
     ctx.lib = str(fake)
     results = helpers.run(ctx, ["RT-S-02", "RT-S-01"])
     assert results["RT-S-02"].outcome == "blocked" and "ELF" in results["RT-S-02"].message
-    assert results["RT-S-01"].outcome == "blocked" and "LD_LIBRARY_PATH" in results["RT-S-01"].message
+    assert results["RT-S-01"].outcome == "blocked" and "does not load" in results["RT-S-01"].message
+    assert "LD_LIBRARY_PATH" not in results["RT-S-01"].message  # round 5, A16: that advice is for a missing dependency, not for a file that is no library
 
 
 # ---- A16: what the runtime itself says ------------------------------------------------------------------------------------
@@ -575,3 +577,225 @@ def test_version_is_printed_and_comes_from_one_place(capsys):
     with pytest.raises(SystemExit) as stop:
         cli.main(["--version"])
     assert stop.value.code == 0 and f"oaax-conformance {__version__}" in capsys.readouterr().out
+
+
+# ---- round 5 ------------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("args", [["-e", "T=s3cretvalue"], ["-eT=s3cretvalue"], ["-e=T=s3cretvalue"], ["--env", "T=s3cretvalue"], ["--env=T=s3cretvalue"],
+                                  ["--gpus=all", "-e", "T=s3cretvalue"]])
+def test_every_docker_env_form_registers_its_bare_value_as_a_secret(args):
+    """A1/A3: `--env=NAME=VALUE` and `-e=NAME=VALUE` registered "NAME=VALUE" as the secret, so the value alone leaked into every report."""
+    secrets = report.secret_values([], args)
+    assert secrets == ["s3cretvalue"]
+    shown = " ".join(report.mask_docker_args(args))
+    assert "s3cretvalue" not in shown and "T=***" in shown
+    assert "s3cretvalue" not in report.clean_text("failed: token=s3cretvalue", [], secrets)
+
+
+def test_a_value_containing_equals_signs_is_kept_whole():
+    assert report.secret_values([], ["-e", "T=a=b=c"]) == ["a=b=c"]
+
+
+@pytest.mark.parametrize("args", [["-e", "T"], ["--env", "T"], ["--env=T"], ["-eT"], ["-e=T"]])
+def test_a_variable_docker_takes_from_this_environment_is_a_secret_too(args, monkeypatch):
+    """A3: `-e NAME` has no value in the arguments, but docker injects ours into the container and the toolchain may echo it."""
+    monkeypatch.setenv("T", "s3cretvalue")
+    assert report.secret_values([], args) == ["s3cretvalue"]
+    assert report.mask_docker_args(args) == args  # nothing to hide in the arguments themselves
+    monkeypatch.delenv("T")
+    assert report.secret_values([], args) == []  # an unset variable has no value to leak
+
+
+def test_an_env_file_is_refused_because_its_values_cannot_be_kept_out_of_the_reports(capsys):
+    assert cli.main(["toolchain", "x", "--docker-arg=--env-file=/etc/hostname"]) == 3
+    assert "-e NAME=VALUE" in capsys.readouterr().err
+
+
+def test_text_that_xml_cannot_hold_is_escaped_so_junit_stays_parseable(tmp_path):
+    """A2: U+FFFE/U+FFFF and lone surrogates are valid in a Python string and in UTF-8 but not in XML 1.0, and a toolchain's last output line is quoted in a message."""
+    from dataclasses import asdict
+
+    nasty = "fatal: ￾￿ \ud800 \x9b[31m ‮ rest"
+    doc = {"spec_version": "2.0", "results": [asdict(report.Result("A", "t", "MUST", "s", "fail", nasty))]}
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), report.scrub(doc, [], []))
+    failure = ET.parse(path).getroot().find("testcase/failure")  # raises on malformed XML
+    assert failure.get("message") == "fatal: \\ufffe\\uffff \\ud800 \\x9b[31m \\u202e rest"
+
+
+# ---- round 5, A10: a timing the spec does not bound is never a failure ---------------------------------------------------------------
+
+def test_a_slow_cleanup_with_requests_in_flight_is_a_warning_not_a_failure(build_dir, monkeypatch):
+    """RT-M-31 failed any cleanup over 10 s although the spec sets no bound (the mock takes 1.2 s, the hint threshold is lowered to 0.5 s)."""
+    from oaax_conformance.checks import runtime_model
+
+    monkeypatch.setattr(runtime_model, "SLOW_CLEANUP_MS", 500)
+    result = _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"]
+    assert result.outcome == "warn" and "SUCCESS but took 1." in result.message
+    assert _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"].outcome == "warn"  # the same on a second run: no hidden state
+    monkeypatch.setattr(runtime_model, "SLOW_CLEANUP_MS", 10000)
+    assert _run(build_dir, "slow_cleanup", ["RT-M-31"], monkeypatch)["RT-M-31"].outcome == "pass"
+
+
+def test_one_slow_retrieve_zero_call_on_a_loaded_host_is_not_a_failure(build_dir, monkeypatch):
+    """RT-M-13 judged ONE sample; it now takes the fastest of 5, so a single delayed call passes and a runtime that is always slow still fails."""
+    assert _run(build_dir, "retrieve0_hiccup", ["RT-M-13"], monkeypatch)["RT-M-13"].outcome == "pass"
+    slow = _run(build_dir, "retrieve0_blocks", ["RT-M-13"], monkeypatch)["RT-M-13"]
+    assert slow.outcome == "fail" and "in each of 5 calls" in slow.message
+
+
+def test_the_timeout_steps_report_the_fastest_and_the_slowest_sample(build_dir, monkeypatch):
+    monkeypatch.setenv("OAAX_MOCK_FAULT", "retrieve0_hiccup")
+    run = _scenario(build_dir, "timeouts", ["-i", "x:FLOAT:1,4", "-i", "scale:FLOAT:1"], timeout=20)
+    assert run.step("retrieve_0")["ms"] < 100 < run.step("retrieve_0")["max_ms"]  # one call took 300 ms, the fastest did not
+    assert run.step("retrieve_200")["max_ms"] >= 190
+
+
+def test_an_init_slower_than_the_budget_blocks_the_checks_that_need_it(build_dir, monkeypatch):
+    """RT-L-07 and RT-M-02 run init many times: a runtime that takes minutes to start is BLOCKED (raise --timeout), never FAILED."""
+    results = _run(build_dir, "hang_init", ["RT-L-07", "RT-M-02"], monkeypatch, timeout=5)
+    assert {i: r.outcome for i, r in results.items()} == {"RT-L-07": "blocked", "RT-M-02": "blocked"}
+
+
+# ---- round 5, A4-A6: install instructions the user can follow --------------------------------------------------------------------------
+
+def test_no_message_or_doc_tells_the_user_to_pip_install():
+    """A6: the package is not on PyPI, so `pip install oaax-conformance` would install whatever squats that name, and uv tool environments have no pip."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    files = [*(root / "python").rglob("*.py"), root / "README.md", root / "CONTRIBUTING.md", root / "docs" / "design.md"]
+    assert [str(f.relative_to(root)) for f in files if "pip install" in f.read_text()] == []
+
+
+def test_the_readme_gives_the_python_the_wheel_needs():
+    """A4: `uv tool install` of the wheel fails on a default Python 3.11 unless told `--python 3.12` (requires-python is >=3.12)."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "uv tool install --python 3.12 oaax_conformance" in readme and "[e2e]" not in readme
+
+
+# ---- round 5, A11: a PASS that rests on less than the specified work says so -----------------------------------------------------------------
+
+def test_a_slow_init_is_not_a_pass_with_an_empty_message_after_a_few_cycles(build_dir, monkeypatch):
+    """A11: with a slow init RT-L-07 (50 cycles), RT-L-10 and RT-M-35 passed after 3 cycles, silently; a leak of 1 MB per cycle passes 3 cycles."""
+    results = _run(build_dir, "slow_init", ["RT-L-07", "RT-L-10", "RT-M-35"], monkeypatch, timeout=20)
+    assert results["RT-L-07"].outcome == "pass" and re.search(r"only \d+ of 50 init/cleanup cycles ran \(the time budget ran out: raise --timeout\)", results["RT-L-07"].note)
+    for check in ("RT-L-10", "RT-M-35"):
+        assert results[check].outcome == "blocked" and "at least 10" in results[check].message and "--timeout" in results[check].message
+
+
+def test_hardware_safe_cycles_are_blocked_for_growth_and_noted_for_repeatability(build_dir):
+    ctx = helpers.context(build_dir)
+    ctx.hardware_safe()
+    results = helpers.run(ctx, ["RT-L-07", "RT-L-10"])
+    assert results["RT-L-07"].outcome == "pass" and results["RT-L-07"].note == "only 3 of 50 init/cleanup cycles ran (--hardware-safe runs few cycles by design)"
+    assert results["RT-L-10"].outcome == "blocked" and "--hardware-safe" in results["RT-L-10"].message
+
+
+def test_a_note_is_printed_on_the_console_and_kept_in_junit(tmp_path):
+    from dataclasses import asdict
+
+    r = report.Result("A", "t", "MUST", "s", "pass", note="only 3 of 50 cycles ran")
+    text = report.console([r], 0)
+    assert "Details" in text and "A [MUST] PASS" in text and "note: only 3 of 50 cycles ran" in text
+    path = tmp_path / "junit.xml"
+    report.write_junit(str(path), {"spec_version": "2.0", "results": [asdict(r)]})
+    assert "NOTE [MUST] only 3 of 50 cycles ran" in path.read_text()
+
+
+# ---- round 5, A9 ------------------------------------------------------------------------------------------------------------------------------
+
+def _cli_run(build_dir, tmp_path, *extra):
+    out = tmp_path / "out"
+    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--quiet", "--pause", "0",
+            "--out", str(out), *extra]
+    return cli.main(argv), out
+
+
+def test_a_secret_that_is_a_common_word_does_not_rewrite_the_specification_text(build_dir, tmp_path):
+    """A9c: scrub() ran over the whole document, so --init-config device=load turned "two models loaded in one call" into "two models ***ed" in the permanent record."""
+    code, out = _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--init-config", "device=load", "--only", "RT-M-02")
+    assert code == 0
+    result = json.loads((out / "report.json").read_text())["results"][0]
+    assert "load_models" in result["pass_when"] and "***" not in result["pass_when"] + result["source"] + result["title"]
+
+
+def test_a_limited_selection_says_so_everywhere(build_dir, tmp_path, capsys):
+    """A9d: `--only X --only Y` printed "Result: no MUST check failed" and recorded nothing about the 60 checks that did not run."""
+    code, out = _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--only", "RT-M-33", "--only", "RT-M-08")
+    assert code == 0
+    assert re.search(r"Only 2 of \d+ approved checks were selected", capsys.readouterr().out)
+    doc = json.loads((out / "report.json").read_text())
+    assert doc["summary"]["checks_selected"] == 2 and doc["summary"]["checks_approved"] > 50
+    prop = ET.parse(out / "junit.xml").getroot().find("properties/property")
+    assert prop.get("name") == "checks_selected" and prop.get("value").startswith("2 of ")
+
+
+def test_a_full_run_does_not_claim_to_be_partial(build_dir, tmp_path, capsys):
+    _cli_run(build_dir, tmp_path, "--init-config", "vendor_key=1", "--only", "RT-S-01")
+    assert "approved checks were selected" in capsys.readouterr().out
+    results = helpers.run(helpers.context(build_dir))
+    assert "approved checks were selected" not in report.console(list(results.values()), 0, selected=(len(results), len(results)))
+
+
+def test_a_tmpdir_docker_cannot_mount_is_refused_naming_the_cause(tmp_path, monkeypatch, capsys):
+    """A9e: with ':' in TMPDIR every `docker run -v` failed and the message blamed the Docker setup and --docker-arg."""
+    import tempfile
+
+    bad = tmp_path / "a:b"
+    bad.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(bad))
+    assert cli.main(["toolchain", "x"]) == 3
+    assert "contains ':'" in capsys.readouterr().err
+
+
+# ---- round 5, A14: the documented sandbox is what the code does ---------------------------------------------------------------------------------
+
+def test_every_conversion_runs_with_dropped_capabilities_and_the_docker_arg_comes_last():
+    """A14: only five conversions were restricted; every other one had the default capabilities. --docker-arg stays last so docker lets it override."""
+    from types import SimpleNamespace
+
+    from oaax_conformance.toolchain import ToolchainContext
+
+    ctx = ToolchainContext("img", "m.onnx", ["--cap-add=SYS_NICE", "--pids-limit=9"])
+    ws = SimpleNamespace(in_dir="/w/in", out_dir="/w/out")
+    cmd = ctx._docker(ws, "valid", ["/input/m.onnx", "/output/r"], user=None, network=True, read_only_rootfs=False, ro_input=False, ro_output=False)
+    assert ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "4096"] == cmd[cmd.index("--cap-drop"):cmd.index("--cap-drop") + 6]
+    assert cmd.index("--cap-drop") < cmd.index("--cap-add=SYS_NICE") < cmd.index("img") and "--network" not in cmd
+
+
+def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
+    """A14: "no network, read-only mounts" was claimed for every run; it holds for the runs that repeat a conversion under that restriction."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for name in ("README.md", "SECURITY.md"):
+        text = (root / name).read_text()
+        assert "(no network, read-only mounts, unprivileged user)" not in text and "without network, with read-only mounts" not in text
+    assert "--cap-drop ALL" in (root / "README.md").read_text() and "TC-03" in (root / "SECURITY.md").read_text()
+
+
+# ---- round 5, A16: a file that is not a runtime library is one line, not 60 BLOCKED rows -----------------------------------------------------------
+
+@pytest.mark.parametrize("kind,cause", [("empty", "file too short"), ("text", "file too short|invalid ELF header"), ("executable", "cannot dynamically load|not a dynamic executable"),
+                                        ("elf32", "wrong ELF class")])
+def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path, capsys, kind, cause):
+    """A16: a 0-byte file, a text file or an executable as the "runtime" gave 60+ BLOCKED rows, exit 2 and a wrong "set LD_LIBRARY_PATH" hint."""
+    import shutil
+
+    path = tmp_path / "libRuntimeLibrary.so"
+    if kind == "empty":
+        path.write_bytes(b"")
+    elif kind == "text":
+        path.write_text("this is not a library\n" * 20)
+    elif kind == "executable":
+        shutil.copy(shutil.which("true"), path)
+    else:
+        data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+        data[4] = 1  # ELFCLASS32
+        path.write_bytes(bytes(data))
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    err = capsys.readouterr().err.strip()
+    assert re.search(cause, err) and "LD_LIBRARY_PATH" not in err and len(err.splitlines()) == 1 and "BLOCKED" not in err

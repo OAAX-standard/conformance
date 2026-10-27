@@ -2,6 +2,7 @@
 import hashlib
 import json
 import platform
+import os
 import re
 import tempfile
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ class Result:
     message: str = ""
     pass_when: str = ""
     scenarios: list = field(default_factory=list)  # scenarios the check read: its evidence
+    note: str = ""  # a pass that rests on less than the specified work says so (for example: only 3 of 50 cycles fit the time budget)
 
 
 def exit_code(results: list[Result]) -> int:
@@ -42,7 +44,7 @@ def _paint(outcome: str, text: str, color: bool) -> str:
     return f"\033[{COLORS[outcome]}m{text}\033[0m" if color else text
 
 
-def console(results: list[Result], not_approved: int, color: bool = False, title: str = "") -> str:
+def console(results: list[Result], not_approved: int, color: bool = False, title: str = "", selected: tuple[int, int] | None = None) -> str:
     rows = [(r.id, r.title.replace("`", ""), r.level, "N/A" if r.outcome == "na" else r.outcome.upper()) for r in results]
     header = ("ID", "Check", "Level", "Status")
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(4)]
@@ -54,16 +56,21 @@ def console(results: list[Result], not_approved: int, color: bool = False, title
     out += [line(header), "  ".join("-" * w for w in widths)]
     out += [line(row, r.outcome) for row, r in zip(rows, results)]
 
-    details = [r for r in results if r.outcome != "pass"]
+    details = [r for r in results if r.outcome != "pass" or r.note]
     if details:
         out += ["", "Details"]
         for r in details:
-            out.append(f"  {r.id} [{r.level}] {r.outcome.upper()}: {r.message[:MESSAGE_WIDTH]}{'...' if len(r.message) > MESSAGE_WIDTH else ''}")
+            text = r.message if r.outcome != "pass" else ""
+            out.append(f"  {r.id} [{r.level}] {r.outcome.upper()}: {text[:MESSAGE_WIDTH]}{'...' if len(text) > MESSAGE_WIDTH else ''}".rstrip(": "))
+            if r.note:
+                out.append(f"      note: {r.note[:MESSAGE_WIDTH]}")
             if r.outcome in ("fail", "warn"):
                 out.append(f"      spec: {r.source}")
 
     counts = {o: sum(r.outcome == o for r in results) for o in COLORS}
     out += ["", ", ".join(f"{n} {'n/a' if o == 'na' else o}" for o, n in counts.items() if n) + f"  ({not_approved} draft tests not run)"]
+    if selected and selected[0] < selected[1]:  # --only / a limited selection: the verdict below covers these checks only
+        out.append(f"Only {selected[0]} of {selected[1]} approved checks were selected: the result below says nothing about the others.")
     out.append(f"Result: {VERDICTS[exit_code(results)]}. {DISCLAIMER}")
     return "\n".join(out)
 
@@ -73,7 +80,8 @@ VERDICTS = {0: "no MUST check failed", 1: "FAILED", 2: "INCOMPLETE: some MUST ch
 DISCLAIMER = "This run covers only the approved tests; it is not a full conformance claim."
 
 
-_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f]")
+# Everything XML 1.0 cannot hold (C0, U+FFFE/FFFF, lone surrogates) plus what can hijack a terminal or reorder text (C1 incl. CSI, bidi overrides).
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff\ufffe\uffff]")
 _SCRATCH_DIR = re.compile(re.escape(tempfile.gettempdir()) + r"/tmp\w{6,}")  # the scenario's own working directory (no --workdir) and our workspaces
 MAX_TEXT = 20000  # a runtime can return megabytes of error text
 
@@ -88,7 +96,7 @@ def clean_text(text: str, private_paths: list[str] = (), secrets: list[str] = ()
     text = _SCRATCH_DIR.sub("<tmp>", text)
     if len(text) > MAX_TEXT:
         text = f"{text[:MAX_TEXT]}... [{len(text) - MAX_TEXT} more characters]"
-    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    return _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 256 else f"\\u{ord(m.group()):04x}", text)
 
 
 def scrub(value, private_paths: list[str] = (), secrets: list[str] = ()):
@@ -104,28 +112,45 @@ def scrub(value, private_paths: list[str] = (), secrets: list[str] = ()):
 
 def scrub_results(results: list[Result], private_paths: list[str], secrets: list[str]) -> list[Result]:
     """The results as they are shown on the console: the same cleaning as the reports."""
-    return [replace(r, message=clean_text(r.message, private_paths, secrets), title=clean_text(r.title)) for r in results]
+    return [replace(r, message=clean_text(r.message, private_paths, secrets), note=clean_text(r.note, private_paths, secrets), title=clean_text(r.title)) for r in results]
+
+
+def _env_args(args: list[str]) -> list[tuple[int, str, str]]:
+    """(index, prefix, "NAME[=VALUE]") of every environment argument docker will see, in each spelling it accepts:
+    `-e V`, `-eV`, `-e=V`, `--env V`, `--env=V`. One parser for masking and for the secrets, so they cannot disagree."""
+    found, i = [], 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-e", "--env"):
+            i += 1
+            if i < len(args):
+                found.append((i, "", args[i]))
+        elif arg.startswith("--env="):
+            found.append((i, "--env=", arg[len("--env="):]))
+        elif arg.startswith("-e") and not arg.startswith("--") and len(arg) > 2:
+            head = "-e=" if arg[2] == "=" else "-e"
+            found.append((i, head, arg[len(head):]))
+        i += 1
+    return found
 
 
 def mask_docker_args(args: list[str]) -> list[str]:
-    """Environment values are the likeliest secrets in docker arguments: show the variable, not the value."""
-    out, after_env = [], False
-    for arg in args:
-        masked = arg
-        if arg.startswith("--env=") or after_env or (arg.startswith("-e") and arg != "-e" and "=" in arg):
-            head = "--env=" if arg.startswith("--env=") else "-e" if arg.startswith("-e") and not after_env else ""
-            name, sep, _ = arg[len(head):].partition("=")
-            masked = head + name + sep + "***" if sep else arg
-        out.append(masked)
-        after_env = arg in ("-e", "--env")
+    """Environment values are the likeliest secrets in docker arguments: show the variable, not the value. Other flags (--label, --add-host...) are shown as given."""
+    out = list(args)
+    for i, head, pair in _env_args(args):
+        name, sep, _ = pair.partition("=")
+        if sep:
+            out[i] = head + name + sep + "***"
     return out
 
 
 def secret_values(init_config: list[str], docker_args: list[str]) -> list[str]:
-    """Every value that must never appear in a report: --init-config values and environment values given to docker."""
+    """Every value that must never appear in a report: --init-config values and the environment values docker passes to the container,
+    including `-e NAME` with no value (docker takes it from this process's environment)."""
     values = [pair.split("=", 1)[1] for pair in init_config if "=" in pair]
-    masked = mask_docker_args(docker_args)
-    values += [orig.split("=", 1)[1] for orig, new in zip(docker_args, masked) if orig != new and "=" in orig]
+    for _, _, pair in _env_args(docker_args):
+        name, sep, value = pair.partition("=")
+        values.append(value if sep else os.environ.get(name, ""))
     return [v for v in values if len(v) >= 3]  # a one-character "secret" would shred every message
 
 
@@ -146,6 +171,8 @@ def _document(suite, spec_version: str, subject: dict, options: dict, private_pa
             "counts": {o: sum(r.outcome == o for r in results) for o in COLORS},
             "by_level": {lv: {o: sum(r.outcome == o and r.level == lv for r in results) for o in COLORS} for lv in levels},
             "draft_tests_not_run": suite.not_approved,
+            "checks_selected": suite.selected,
+            "checks_approved": suite.approved,
         },
         "results": [asdict(r) for r in results],
         "scenarios": {
@@ -161,7 +188,14 @@ def _document(suite, spec_version: str, subject: dict, options: dict, private_pa
     }
     if suite.leftovers:
         doc["leftovers"] = suite.leftovers
-    return scrub(doc, [*private_paths, str(Path.home())], secrets)
+    # Only what was observed is scrubbed: the specification's own text (titles, pass_when, source) must not be rewritten because a secret happens to be a common word.
+    hide = [[*private_paths, str(Path.home())], secrets]
+    for r in doc["results"]:
+        r["message"], r["note"] = clean_text(r["message"], *hide), clean_text(r["note"], *hide)
+    for key in ("scenarios", "subject", "options", "leftovers"):
+        if key in doc:
+            doc[key] = scrub(doc[key], *hide)
+    return doc
 
 
 def build(suite, lib: str, spec_version: str, init_config: list[str], ignore_threads: list[str], private_paths: list[str] = ()) -> dict:
@@ -202,6 +236,10 @@ def write_junit(path: str, doc: dict) -> None:
     suite = ET.Element("testsuite", name=f"oaax-conformance {doc['spec_version']}", tests=str(len(results)), failures=count(lambda r: r.outcome == "fail"),
                        errors=count(lambda r: r.outcome == "error" or incomplete(r)),
                        skipped=count(lambda r: r.outcome in ("blocked", "skipped") and not incomplete(r)))
+    selected = doc.get("summary", {})
+    if selected.get("checks_selected") is not None:  # a limited selection must not look like a full run to a CI that reads only this file
+        props = ET.SubElement(suite, "properties")
+        ET.SubElement(props, "property", name="checks_selected", value=f"{selected['checks_selected']} of {selected['checks_approved']}")
     for r in results:
         case = ET.SubElement(suite, "testcase", classname=r.level, name=f"{r.id} {r.title}")
         if r.outcome == "fail":
@@ -212,4 +250,6 @@ def write_junit(path: str, doc: dict) -> None:
             ET.SubElement(case, "skipped", message=r.message)
         elif r.outcome == "warn":
             ET.SubElement(case, "system-out").text = f"WARNING [{r.level}] {r.message}"
+        if r.note:
+            ET.SubElement(case, "system-out").text = f"NOTE [{r.level}] {r.note}"
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)

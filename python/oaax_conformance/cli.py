@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -76,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     tc.add_argument("image", help="the toolchain image, e.g. oaax-cpu-toolchain:2.0.0")
     _add_common(tc)
     tc.add_argument("--onnx", metavar="FILE", help="a valid ONNX model this toolchain can convert (default: a small convolution model shipped with the suite)")
+    tc.add_argument("--model-file", metavar="NAME", help="which file of the output directory is the model, if the toolchain writes several (default: the suite tries each "
+                    "and uses the one the runtime loads); relative to the output directory")
     tc.add_argument("--runtime", metavar="LIB", help="the runtime that loads what the toolchain produces: enables the E2E tests")
     tc.add_argument("--docker-arg", action="append", default=[], metavar="ARG", help="an argument added to every `docker run` (repeatable), e.g. --docker-arg=--gpus=all; "
                     "the suite sets --user, --network, --read-only and the mounts itself")
@@ -129,7 +132,13 @@ def _validate(args) -> str | None:
             return f"--onnx {args.onnx}: no such file"
         if args.runtime and not Path(args.runtime).is_file():
             return f"--runtime {args.runtime}: no such library"
+        if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
+            return f"--model-file {args.model_file}: must be a path inside the output directory"
+        if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
+            return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
         for arg in args.docker_arg:
+            if arg.split("=", 1)[0] == "--env-file":  # its values cannot be known, so they could not be kept out of the reports
+                return f"--docker-arg {arg}: pass variables as -e NAME=VALUE; the values of an env file cannot be kept out of the reports"
             if arg.split("=", 1)[0] in FORBIDDEN_DOCKER_ARGS:
                 return f"--docker-arg {arg}: the suite sets this itself (a value here would change what the tests test)"
     return None
@@ -140,7 +149,7 @@ def _print_and_write(suite, args, title: str, document, paths: list[str], secret
         return usage_error("no test ran: the selection matches no approved test (see docs/tests)")
     shown = report.scrub_results(suite.results, paths, secrets)
     color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-    print(report.console(shown, suite.not_approved, color, title))
+    print(report.console(shown, suite.not_approved, color, title, (suite.selected, suite.approved)))
     if suite.leftovers:
         print("\nCould not remove (owned by another user, left alone): " + ", ".join(suite.leftovers))
     if args.out:
@@ -156,6 +165,18 @@ def _print_and_write(suite, args, title: str, document, paths: list[str], secret
     return report.exit_code(suite.results)
 
 
+# What dlerror() says for a file that is not a shared library for this machine (a missing dependency says "cannot open shared object file" and is the suite's business).
+NOT_A_LIBRARY = ("file too short", "invalid ELF header", "not a dynamic executable", "cannot dynamically load", "wrong ELF class", "ELF load command", "not an ELF")
+
+
+def _not_a_library(ctx) -> str | None:
+    run = ctx.run("static")  # RT-S-01's own scenario: it only loads the library and looks up the nine exports
+    text = run.dlopen_error() if run.end == "dlopen" else ""
+    if any(pattern in text for pattern in NOT_A_LIBRARY):
+        return f"{ctx.lib} is not a loadable runtime library ({text.replace(f"{ctx.lib}: ", "")}): pass the libRuntimeLibrary.so built for this machine"
+    return None
+
+
 def _runtime(args) -> int:
     lib = str(Path(args.library).resolve())
     model = str(Path(args.model).resolve()) if args.model else None
@@ -164,6 +185,9 @@ def _runtime(args) -> int:
                       workdir=str(Path(args.workdir).resolve()) if args.workdir else None, progress=not args.quiet)
     except FileNotFoundError as e:
         return usage_error(str(e))
+    problem = _not_a_library(ctx)
+    if problem:  # 60 BLOCKED rows and a wrong hint would hide this one line
+        return usage_error(problem)
     skip = {i: "skipped by request (--skip)" for i in args.skip}
     if args.hardware_safe:
         ctx.hardware_safe()
@@ -193,6 +217,7 @@ def _toolchain(args) -> int:
     runtime = str(Path(args.runtime).resolve()) if args.runtime else None
     ctx = ToolchainContext(args.image, onnx, args.docker_arg, args.timeout or 900, runtime, harness, args.init_config)
     ctx.progress = not args.quiet
+    ctx.model_file = args.model_file
     skip = {i: "skipped by request (--skip)" for i in args.skip}
     try:
         suite = run_suite(ctx, args.only, prefixes=("TC-", "E2E-"), skip=skip)

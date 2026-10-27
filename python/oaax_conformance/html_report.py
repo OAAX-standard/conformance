@@ -92,6 +92,8 @@ def _test(r: dict, scenarios: dict) -> str:
             if n in scenarios
         )
     message = f'<div><h3>Observed</h3><p class="msg" style="background:var(--{r["outcome"]}-bg)">{escape(r["message"])}</p></div>' if r["message"] else ""
+    if r.get("note"):
+        message += f'<div><h3>Note</h3><p class="msg" style="background:var(--warn-bg)">{escape(r["note"])}</p></div>'
     return (
         f'<details class="test" data-outcome="{r["outcome"]}"><summary><span class="id">{escape(r["id"])}</span>'
         f'<span>{escape(r["title"].replace("`", ""))}</span><span class="muted small">{escape(r["level"])}</span>{_pill(r["outcome"])}</summary>'

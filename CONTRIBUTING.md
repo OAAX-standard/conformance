@@ -26,5 +26,5 @@ For a new toolchain test, add a fault to `mock-toolchain/mock_toolchain.py` and 
 
 ## Releasing (maintainers)
 
-Set `__version__` in `python/oaax_conformance/__init__.py` (the one place) and move the `CHANGELOG.md` entry from "unreleased" to the version and date. Push a tag `vX.Y.Z` on `main`:
-the `build` workflow checks that the tag matches the version, builds and smoke-tests the wheel, and creates a **draft** GitHub Release for a maintainer to review and publish. Nothing goes to PyPI.
+Set `__version__` in `python/oaax_conformance/__init__.py` (the one place) and move the `CHANGELOG.md` entry from "unreleased" to the version and a date (`## 0.1.0 - 2026-11-03`). Push a tag `vX.Y.Z` on `main`:
+the `build` workflow checks that the tag is a commit of `main` and matches the version, that the CHANGELOG heading is dated, builds and smoke-tests the wheel (specs inside, exit codes), and creates a **draft** GitHub Release with the wheel, the checksums and the CHANGELOG notes for a maintainer to review and publish. A re-run refuses if a release for the tag exists. Nothing goes to PyPI.

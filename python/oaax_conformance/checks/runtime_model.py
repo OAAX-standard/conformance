@@ -2,7 +2,10 @@
 import json
 
 from ..harness import status_name
-from ..registry import Blocked, Fail, NotApplicable, check
+from ..registry import Blocked, Fail, NotApplicable, Warn, check
+from .runtime_lifecycle import MIN_CYCLES_FOR_GROWTH, _why_fewer
+
+SPEC_MODEL_CYCLES = 20  # what RT-M-35 is titled with
 
 SUCCESS, NO_OUTPUT_AVAILABLE = 0, 12
 TENSOR_SHAPE_MISMATCH, TENSOR_TYPE_MISMATCH, INVALID_MODEL_ID = 10, 11, 18
@@ -182,6 +185,10 @@ def output_names(ctx):
         raise Fail(f"output names {got} differ from the model's {expected}")
 
 
+IMMEDIATE_MS = 100  # "returns immediately", as the fastest of several calls
+SLOW_CLEANUP_MS = 10000
+
+
 # ---- timeouts ------------------------------------------------------------------------------------------------
 
 
@@ -190,8 +197,8 @@ def timeout_zero(ctx):
     obs = _scenario(ctx, "timeouts").step("retrieve_0")
     if obs["status"] != NO_OUTPUT_AVAILABLE:
         raise Fail(f"retrieve_output(0) with nothing in flight returned {_name(obs['status'])}, expected NO_OUTPUT_AVAILABLE")
-    if obs["ms"] > 100:
-        raise Fail(f"retrieve_output(0) took {obs['ms']:.0f} ms instead of returning immediately")
+    if obs["ms"] > IMMEDIATE_MS:  # the fastest of 5 calls: one slow call on a loaded host proves nothing, five do
+        raise Fail(f"retrieve_output(0) took at least {obs['ms']:.0f} ms in each of 5 calls instead of returning immediately")
 
 
 @check("RT-M-14")
@@ -199,8 +206,8 @@ def timeout_positive(ctx):
     obs = _scenario(ctx, "timeouts").step("retrieve_200")
     if obs["status"] != NO_OUTPUT_AVAILABLE:
         raise Fail(f"retrieve_output(200) with nothing in flight returned {_name(obs['status'])}, expected NO_OUTPUT_AVAILABLE")
-    if obs["ms"] > 200 + 1000:
-        raise Fail(f"retrieve_output(200) took {obs['ms']:.0f} ms")
+    if obs["ms"] > 200 + 1000:  # the fastest of 3 calls, for the same reason
+        raise Fail(f"retrieve_output(200) took at least {obs['ms']:.0f} ms in each of 3 calls")
 
 
 @check("RT-M-15")
@@ -348,11 +355,11 @@ def cleanup_with_requests_in_flight(ctx):
     cleanup = run.step("cleanup")
     if cleanup["status"] != SUCCESS:
         raise Fail(f"cleanup with requests in flight returned {_name(cleanup['status'])}")
-    if cleanup["ms"] > 10000:
-        raise Fail(f"cleanup with requests in flight took {cleanup['ms']:.0f} ms")
     if run.step("init_again")["status"] != SUCCESS:
         raise Fail("init after such a cleanup failed")
     _answered(run, "infer_again")
+    if cleanup["ms"] > SLOW_CLEANUP_MS:  # the spec sets no time bound for cleanup: worth knowing, not a failure
+        raise Warn(f"cleanup with requests in flight returned SUCCESS but took {cleanup['ms'] / 1000:.1f} s")
 
 
 @check("RT-M-32")
@@ -420,10 +427,15 @@ def cycles_with_a_model(ctx):
     if obs["threads_after"] > obs["threads_before"]:
         problems.append(f"{obs['threads_after'] - obs['threads_before']} thread(s) left after {obs['cycles']} cycles")
     growth = obs["rss_last"] - obs["rss_first"]
-    if obs["rss_first"] >= 0 and growth > MAX_CYCLE_RSS_GROWTH:
+    if obs["rss_first"] >= 0 and obs["completed"] >= MIN_CYCLES_FOR_GROWTH and growth > MAX_CYCLE_RSS_GROWTH:
         problems.append(f"RSS grew {growth / 1048576:.1f} MB over {obs['cycles']} init/load/cleanup cycles (limit {MAX_CYCLE_RSS_GROWTH // 1048576} MB)")
     if problems:
         raise Fail("; ".join(problems))
+    if obs["completed"] < MIN_CYCLES_FOR_GROWTH:
+        raise Blocked(f"only {obs['completed']} of {SPEC_MODEL_CYCLES} init/load/cleanup cycles ran ({_why_fewer(ctx)}): no failure and no thread left, but too few cycles "
+                      f"to tell memory growth from noise (at least {MIN_CYCLES_FOR_GROWTH} are needed)")
+    if obs["completed"] < SPEC_MODEL_CYCLES:
+        ctx.notes.append(f"only {obs['completed']} of {SPEC_MODEL_CYCLES} init/load/cleanup cycles ran ({_why_fewer(ctx)})")
 
 
 @check("RT-M-36")

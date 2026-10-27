@@ -15,7 +15,7 @@ from oaax_conformance import manifest  # noqa: E402
 
 
 def fault(name: str) -> bool:
-    return os.environ.get("OAAX_MOCK_FAULT") == name
+    return name in os.environ.get("OAAX_MOCK_FAULT", "").split(",")
 
 
 def say(text: str) -> None:
@@ -25,8 +25,13 @@ def say(text: str) -> None:
 
 def write_log(out: str, ok: bool, message: str) -> None:
     if os.path.isdir(out) and not (fault("no_log") or (not ok and fault("no_log_on_failure"))):
+        if fault("fifo_log"):  # a named pipe where the log should be: whoever opens it blocks forever
+            os.mkfifo(os.path.join(out, "logs.json"))
+            return
         with open(os.path.join(out, "logs.json"), "w") as f:
             f.write("not json" if fault("bad_json_log") else json.dumps([{"Message": message, "Data": {"ok": ok}}]))
+            if fault("huge_log"):  # sparse: no disk is used
+                f.truncate(2 << 20)
 
 
 def fail(out: str, message: str, code: int = 1) -> int:
@@ -150,6 +155,12 @@ def main(argv: list[str]) -> int:
     if not fault("no_model"):
         with open(os.path.join(out, model_name), "wb") as f:
             f.write(b"JUNK" if fault("corrupt_model") else b"MOCKMODEL" + data)
+    if fault("second_file"):  # vendor metadata next to the model (2.0 toolchains have no manifest to say which file is the model)
+        with open(os.path.join(out, "a-labels.json"), "w") as f:
+            f.write('{"labels": ["face"]}')
+    if fault("big_output"):  # a compiled model is big: a sparse 8 MiB file stands for it
+        with open(os.path.join(out, "weights.bin"), "wb") as f:
+            f.truncate(8 << 20)
     if fault("subdirs"):  # subdirectories created as the uid the container runs as
         os.makedirs(os.path.join(out, "sub", "deep"), exist_ok=True)
         open(os.path.join(out, "sub", "deep", "file"), "w").close()

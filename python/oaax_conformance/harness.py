@@ -124,11 +124,16 @@ class Run:
                 return f" ({bytes.fromhex(line['err']).decode(errors='replace')})"
         return ""
 
+    def dlopen_error(self) -> str:
+        """What dlerror() said when the harness could not load the library (empty when it did)."""
+        return bytes.fromhex(next((l["str"] for l in self.lines if l.get("step") == "dlopen" and l.get("str")), "")).decode(errors="replace")
+
     def _why_missing(self, name: str) -> str:
         end = self.end
         if end == "dlopen":
-            text = bytes.fromhex(next((l["str"] for l in self.lines if l.get("step") == "dlopen" and l.get("str")), "")).decode(errors="replace")
-            return f"the library does not load: {text or '?'}; its dependencies must be found (set LD_LIBRARY_PATH)"
+            text = self.dlopen_error()
+            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text else ""  # advice only for a missing dependency
+            return f"the library does not load: {text or '?'}{hint}"
         if end == "symbols":
             return "exports are missing (RT-S-01)"
         if end == "init":

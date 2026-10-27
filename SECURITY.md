@@ -11,5 +11,5 @@ Include the affected version (`oaax-conformance --version`), the steps to reprod
 
 ## Scope
 
-The suite loads and runs the runtime library you give it in a child process, and runs the toolchain image you give it in a container (no network, read-only mounts, unprivileged user).
+The suite loads and runs the runtime library you give it in a child process, and runs the toolchain image you give it in a container: every conversion runs as your user id with all Linux capabilities dropped, `no-new-privileges` and a process limit (`--docker-arg` can add back what an image really needs, and that is worth reporting to its vendor). Network access and writable mounts stay on by default, because a toolchain that needs them must be reported, not blocked: separate conversions repeat the run without network (TC-03), as another user id (TC-02, TC-22), with a read-only input (TC-04), a read-only root file system (TC-06) and an unwritable output directory (TC-38).
 It is a test tool, not a sandbox: only check libraries and images you trust to run on your machine. Reports are written without the values of `--init-config` and without directory names.

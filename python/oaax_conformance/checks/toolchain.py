@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .. import manifest
 from ..modelio import NoModelIO, discover
-from ..registry import Blocked, Fail, NotApplicable, check
+from ..registry import Blocked, Fail, NotApplicable, Warn, check
 from ..toolchain import ARBITRARY_UID, LOG_NAMES, MANIFEST, follows_naming, make_hostile_zip
 
 BAD_INPUTS = ("empty", "garbage", "truncated", "missing")
@@ -115,13 +115,26 @@ def a_model_file(ctx):
         raise Fail(f"no non-empty file besides the log in the output directory (found: {', '.join(run.files()) or 'nothing'})")
 
 
+MAX_JSON_BYTES = 10 << 20
+
+
+def _read_json(run, name: str):
+    """JSON of a file the toolchain wrote: opened without following links or blocking, and only up to 10 MB (a 3 GB "log" is the toolchain's problem, not a MemoryError of the suite)."""
+    size = run.files()[name]["size"]
+    if size > MAX_JSON_BYTES:
+        raise Warn(f"{name} is {size / 1e6:.0f} MB: the suite reads at most {MAX_JSON_BYTES >> 20} MB, so its content was not checked")
+    fd = os.open(run.result_dir / name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as f:
+        return json.loads(f.read(MAX_JSON_BYTES + 1).decode("utf-8"))
+
+
 def _log_problem(run) -> str | None:
     logs = run.log_files()
     if not logs:
         return "no conversion-log.json or logs.json in the output directory"
     for name in logs:
         try:
-            json.loads((run.result_dir / name).read_text(encoding="utf-8"))
+            _read_json(run, name)
         except (OSError, ValueError) as e:
             return f"{name} is not valid JSON: {e}"
     return None
@@ -153,7 +166,7 @@ def _manifest_doc(run):
     if MANIFEST not in run.files():
         return None
     try:
-        return json.loads((run.result_dir / MANIFEST).read_text(encoding="utf-8"))
+        return _read_json(run, MANIFEST)
     except (OSError, ValueError) as e:
         raise Fail(f"{MANIFEST} is not valid JSON: {e}")
 
@@ -186,7 +199,8 @@ def manifest_matches_the_model(ctx):
     try:
         original = manifest.derive_io(ctx.onnx_path)
     except ImportError:
-        raise Blocked("reading the ONNX model needs the onnx extra: pip install oaax-conformance[onnx]")
+        raise Blocked("reading the ONNX model needs "
+                      "the onnx extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` with the wheel")
     problems = []
     for kind in ("inputs", "outputs"):
         want = {t["name"]: t["onnx"] for t in original[kind]}
@@ -336,11 +350,22 @@ def _converted(ctx):
     if not ctx.runtime_lib:
         raise Blocked("needs --runtime LIB: the runtime that loads what this toolchain produces")
     doc = _manifest_doc(run)
-    names = [doc["model_file"]] if doc and doc.get("model_file") in run.files() else run.model_files()
-    if len(names) != 1:
-        raise Blocked(f"cannot tell which output file is the model ({', '.join(names) or 'none'}); a 2.1 oaax-manifest.json names it")
-    path = str(run.result_dir / names[0])
-    return ctx.runtime_context(path), path
+    if ctx.model_file:
+        if ctx.model_file not in run.files():
+            raise Blocked(f"--model-file {ctx.model_file}: not in the output directory (found: {', '.join(run.files()) or 'nothing'})")
+        names = [ctx.model_file]
+    elif doc and doc.get("model_file") in run.files():
+        names = [doc["model_file"]]
+    else:
+        names = sorted(run.model_files())  # a 2.0 toolchain has no manifest: vendor metadata may sit next to the model, so the runtime tells which file is it
+    if not names:
+        raise Blocked("the conversion left no model file (see TC-20)")
+    ctx.candidates = names
+    for name in names:
+        rctx = ctx.runtime_context(str(run.result_dir / name))
+        if len(names) == 1 or rctx.run("load-twice").end != "model":
+            return rctx, str(run.result_dir / name)
+    return ctx.runtime_context(str(run.result_dir / names[0])), str(run.result_dir / names[0])  # none loads: E2E-01 says so, the others are blocked on it
 
 
 @check("E2E-01")
@@ -348,7 +373,10 @@ def runtime_loads_it(ctx):
     rctx, _ = _converted(ctx)
     run = rctx.run("load-twice")
     if run.end == "model":
-        raise Fail("the runtime could not load the converted model" + run._why_missing("load_first").split("--model", 1)[-1].replace(")", "", 1).rstrip())
+        why = run._why_missing("load_first").split("--model", 1)[-1].replace(")", "", 1).rstrip()
+        if len(ctx.candidates) > 1:
+            raise Fail(f"the runtime could not load any of the output files ({', '.join(ctx.candidates)}); if the model is one of them, name it with --model-file NAME{why}")
+        raise Fail("the runtime could not load the converted model" + why)
     run.step("load_first")
 
 
@@ -393,7 +421,8 @@ def io_is_retained(ctx):
         converted = _io_views(path, doc)
         original = _io_views(ctx.onnx_path, None)
     except ImportError:
-        raise Blocked("reading ONNX models needs the onnx extra: pip install oaax-conformance[onnx]")
+        raise Blocked("reading ONNX models needs "
+                      "the onnx extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[onnx]'` with the wheel")
     if converted is None:
         raise NotApplicable("the converted model is not ONNX and has no manifest: its I/O cannot be read")
     problems = []
@@ -412,7 +441,8 @@ def same_results(ctx):
         import numpy as np
         import onnxruntime
     except ImportError:
-        raise Blocked("needs the e2e extra: pip install oaax-conformance[e2e]")
+        raise Blocked("needs "
+                      "the e2e extra: `uv sync` in a checkout, or `uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-any.whl[e2e]'` with the wheel")
     from ..reference import deterministic_input
 
     doc = _manifest_doc(_valid(ctx))

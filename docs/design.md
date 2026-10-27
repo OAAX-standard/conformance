@@ -21,7 +21,7 @@ harness/  python/oaax_conformance/  spec/2.0/  mock-runtime/  mock-toolchain/  t
 libraries and device nodes, and Windows DLLs cannot be tested from a Linux container; the toolchain tier starts Docker containers
 itself and must not need the host's Docker socket handed to another container.
 
-- `pip install` of the Python package plus the C harness built with CMake (`scripts/build.sh`). Linux (x86_64, aarch64) first; Windows later.
+- A checkout (`uv sync`) or the wheel (`uv tool install`) of the Python package, plus the C harness built with CMake (`scripts/build.sh`) for the runtime tier. Linux x86_64 is the tested platform; Windows and aarch64 are not tested yet.
 - The toolchain tier needs Docker on the machine running the suite, because a toolchain *is* a Docker image.
 
 ## Direction for OAAX 2.1

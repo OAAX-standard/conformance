@@ -209,7 +209,7 @@ def test_b4_symlinks_are_listed_never_followed_nor_read(tmp_path):
 
     from oaax_conformance.toolchain import Conversion
 
-    run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1}})
+    run = SimpleNamespace(out_path="/output", output={**entries, "ok.onnx": {"dir": False, "size": 1, "reg": True}})
     assert list(Conversion.files(run)) == ["ok.onnx"]  # links are neither models nor logs
 
 
@@ -242,3 +242,97 @@ def test_no_toolchain_check_passes_when_every_conversion_stalls(build_dir, mock_
     results = _run(ctx)
     judged = {i: r.outcome for i, r in results.items() if not i.startswith(("TC-50", "TC-51", "TC-52")) and i != "TC-10" and r.outcome in ("pass", "fail", "warn", "error")}
     assert judged == {}
+
+
+def test_disk_use_does_not_grow_with_the_number_of_conversions(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """A7: every conversion had its own workspace until the end of the run (13x the model's size in the adversary's measurement); big files go as soon as
+    the conversion is done, so the peak stays near one model (the 'valid' one, which E2E loads) plus the conversions in flight."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "big_output", tmp_path, with_runtime=False)
+    peaks = []
+    real = ToolchainContext.convert
+
+    def measured(self, *args, **kwargs):
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            peaks.append(sum(f.stat().st_size for ws in self.workspaces for f in ws.root.rglob("*") if f.is_file() and not f.is_symlink()))
+
+    monkeypatch.setattr(ToolchainContext, "convert", measured)
+    results = _run(ctx, [i for i in CHECKS if i.startswith("TC-") and i not in ("TC-50", "TC-51", "TC-52")])
+    assert len(peaks) >= 12 and {r.outcome for r in results.values()} <= {"pass", "warn", "na", "blocked"}
+    assert max(peaks) < 4 * (8 << 20), f"peak {max(peaks) >> 20} MiB over {len(peaks)} conversions"
+
+
+# ---- round 5, A12: a toolchain that writes more than the model --------------------------------------------------------------------------
+
+def test_vendor_metadata_next_to_the_model_does_not_block_the_end_to_end_tests(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A12: a 2.0 toolchain has no manifest, and a second non-empty file (labels, calibration cache) made E2E-01 BLOCKED with no way out: the suite now
+    tries each candidate and the one the runtime loads is the model (the labels file sorts first and the runtime refuses it)."""
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path), ["E2E-01"])
+    assert results["E2E-01"].outcome == "pass"
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "second_file", tmp_path), ["E2E-01", "E2E-02", "E2E-04"])  # with a manifest, as before
+    assert {i: r.outcome for i, r in results.items()} == {"E2E-01": "pass", "E2E-02": "pass", "E2E-04": "pass"}
+
+
+def test_no_output_file_loads_is_a_failure_that_names_the_candidates_and_the_way_out(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    results = _run(_context(build_dir, mock_io_onnx, CLEAN, "corrupt_model,second_file,no_manifest", tmp_path), ["E2E-01", "E2E-02"])
+    assert results["E2E-01"].outcome == "fail" and "a-labels.json, model.bin" in results["E2E-01"].message and "--model-file" in results["E2E-01"].message
+    assert results["E2E-02"].outcome == "blocked"
+
+
+def test_model_file_names_the_model_explicitly(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path)
+    ctx.model_file = "model.bin"
+    assert _run(ctx, ["E2E-01"])["E2E-01"].outcome == "pass" and ctx.candidates == ["model.bin"]
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "second_file,no_manifest", tmp_path)
+    ctx.model_file = "nope.bin"
+    blocked = _run(ctx, ["E2E-01"])["E2E-01"]
+    assert blocked.outcome == "blocked" and "--model-file nope.bin" in blocked.message and "model.bin" in blocked.message
+
+
+@pytest.mark.parametrize("name", ["../x", "/etc/passwd"])
+def test_model_file_must_stay_inside_the_output_directory(build_dir, name):
+    from oaax_conformance import cli
+
+    assert cli.main(["toolchain", "x", "--model-file", name]) == 3
+
+
+# ---- round 5, A13: files the toolchain writes are not trusted -----------------------------------------------------------------------------
+
+def test_a_named_pipe_where_the_log_should_be_does_not_hang_the_suite(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A13a: logs.json as a FIFO made read_text() block forever (only SIGTERM ended the run, no report); only regular files are listed and opened now."""
+    import signal
+
+    def stuck(*_):
+        raise AssertionError("the suite blocked reading a named pipe")
+
+    old = signal.signal(signal.SIGALRM, stuck)
+    signal.alarm(60)
+    try:
+        result = _run(_context(build_dir, mock_io_onnx, CLEAN, "fifo_log", tmp_path, with_runtime=False), ["TC-21"])["TC-21"]
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert result.outcome == "fail" and "no conversion-log.json or logs.json" in result.message
+
+
+def test_a_huge_log_is_reported_not_read_into_memory(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """A13b: a 3 GB logs.json made json.loads(read_text()) use 3 GB and end as 'TC-21 ERROR: MemoryError, a bug of the suite' (here: 2 MB over a 1 MB limit)."""
+    from oaax_conformance.checks import toolchain as checks
+
+    monkeypatch.setattr(checks, "MAX_JSON_BYTES", 1 << 20)
+    result = _run(_context(build_dir, mock_io_onnx, CLEAN, "huge_log", tmp_path, with_runtime=False), ["TC-21"])["TC-21"]
+    assert result.outcome == "warn" and "2 MB" in result.message and "not checked" in result.message
+
+
+# ---- round 5, A8: one hung baseline conversion costs one timeout ------------------------------------------------------------------------------
+
+def test_a_toolchain_that_hangs_on_a_valid_model_costs_one_timeout_not_one_per_conversion(build_dir, mock_io_onnx, toolchain_images, tmp_path):
+    """A8: every one of the ~15 conversions was tried and timed out on its own (hours with the default 900 s); when the baseline hangs they are blocked at once."""
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, "hang", tmp_path, with_runtime=False)
+    ctx.timeout = 4
+    started = time.monotonic()
+    results = _run(ctx, ["TC-01", "TC-02", "TC-03", "TC-05", "TC-30", "TC-31"])
+    assert time.monotonic() - started < 12  # one 4 s timeout, not six
+    assert {r.outcome for r in results.values()} == {"blocked"}
+    assert "the other conversions are not tried" in results["TC-02"].message and "--timeout" in results["TC-30"].message
