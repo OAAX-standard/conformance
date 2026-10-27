@@ -1,6 +1,7 @@
 name: build
-# Builds the wheel, checks it in a clean environment and keeps it as a workflow artifact.
-# A tag vX.Y.Z (a commit of main) also creates a DRAFT GitHub Release with the wheel, checksums and the CHANGELOG notes: a maintainer reviews and publishes it. Nothing is published to PyPI.
+# Builds one wheel per architecture (the C harness inside, compiled in a manylinux container), checks each in a clean container without a compiler and keeps them as a workflow artifact.
+# A tag vX.Y.Z (a commit of main) also creates a DRAFT GitHub Release with the wheels, one SHA256SUMS and the CHANGELOG notes: a maintainer reviews and publishes it.
+# Publishing the release starts publish.yml, which uploads those same wheels to PyPI.
 on:
   push:
     branches: [main]
@@ -11,7 +12,48 @@ permissions:
   contents: read
 
 jobs:
+  wheel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-latest}
+          - {arch: aarch64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Build the wheel in a manylinux container (reproducible, timestamps fixed to the commit time)
+        shell: bash
+        run: scripts/build-wheel.sh
+      - name: The wheel is a valid platform wheel (the binary needs glibc 2.17 at most, the long description renders)
+        shell: bash
+        run: |
+          uvx auditwheel show dist/*.whl > audit.txt   # the sentence before the quoted tag differs per architecture; the quoted tag line is the verdict
+          cat audit.txt
+          grep -Eq '^"manylinux_2_17_[a-z0-9_]+"\.?$' audit.txt || { echo "the harness needs a newer glibc than the wheel tag says: fix the tag in scripts/build-wheel.sh"; exit 1; }
+          uvx twine check dist/*.whl
+      - name: Smoke test in a bare container without a compiler (the whole runtime tier on the published reference CPU runtime)
+        shell: bash
+        run: |
+          mkdir rt
+          curl -sSfL -o rt/library.tar.gz "https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/${{ matrix.arch }}/Ubuntu/library.tar.gz"
+          tar xzf rt/library.tar.gz -C rt
+          # libgomp1 is the runtime's own dependency, binutils (nm, readelf) is for RT-S-02: neither is a compiler
+          docker run --rm -e SMOKE_NO_COMPILER=1 -e HOME=/tmp/home -v "$(command -v uv)":/usr/local/bin/uv:ro -v "$PWD/scripts":/scripts:ro -v "$PWD/dist":/dist:ro -v "$PWD/rt":/rt:ro \
+            ubuntu:24.04 bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgomp1 binutils && /scripts/smoke.sh /dist/*.whl /rt/libRuntimeLibrary.so'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          overwrite: true  # a re-run of the same commit
+          name: oaax-conformance-wheel-${{ matrix.arch }}-${{ github.sha }}
+          path: dist/*.whl
+          retention-days: 30
+          if-no-files-found: error
+
   build:
+    needs: wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -20,11 +62,16 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.13"
-      - name: Build the wheel (reproducible, timestamps fixed to the commit time)
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: oaax-conformance-wheel-*-${{ github.sha }}
+          merge-multiple: true
+          path: dist
+      - name: One SHA256SUMS over all wheels (both architectures)
+        shell: bash
         run: |
-          export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
-          uv build --wheel --out-dir dist
-          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          test "$(ls dist/*.whl | wc -l)" = 2 || { echo "expected one wheel per architecture"; ls dist; exit 1; }
+          (cd dist && sha256sum *.whl > SHA256SUMS && cat SHA256SUMS)
       - name: The tag must be on main and match the package version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
@@ -40,9 +87,6 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then final="--final"; fi
           uv run --no-project python scripts/release_notes.py "$version" dist/SHA256SUMS $final > dist/release-notes.md
           test -s dist/release-notes.md
-      - name: Smoke test the wheel in a clean environment (the specs are inside, exit codes work)
-        shell: bash
-        run: scripts/smoke.sh "$(ls dist/*.whl)"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           overwrite: true  # a re-run of the same commit

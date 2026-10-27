@@ -2,7 +2,6 @@
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -37,17 +36,26 @@ def status_name(status) -> str:
     return f"unknown status {status}"
 
 
+CHECKOUT_HARNESS = Path(__file__).resolve().parents[2] / "build" / "oaax-harness"  # `scripts/build.sh` in a dev checkout
+
+
+def packaged_harness() -> Path:
+    """Where the wheel keeps the harness (the build hook puts it there; absent in a pure wheel or a checkout)."""
+    return Path(__file__).resolve().parent / "bin" / "oaax-harness"
+
+
 def find_harness(explicit: str | None = None) -> str:
-    if explicit:  # an explicit choice must be honoured or refused, never silently replaced
-        if not Path(explicit).is_file():
-            raise FileNotFoundError(f"--harness {explicit}: no such file")
-        return str(Path(explicit).resolve())
-    repo_build = Path(__file__).resolve().parents[2] / "build" / "oaax-harness"
-    for candidate in (os.environ.get("OAAX_HARNESS"), str(repo_build), shutil.which("oaax-harness")):
-        if candidate and Path(candidate).is_file():
-            return str(Path(candidate).resolve())
-    raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: in a checkout of the repository run scripts/build.sh; the wheel does not contain it. "
-                            "Run from that checkout, or pass --harness PATH or set OAAX_HARNESS")
+    """--harness, OAAX_HARNESS, the harness inside the wheel, then ./build of a dev checkout. An explicit choice is honoured or refused, never replaced."""
+    for source, path in (("--harness", explicit), ("OAAX_HARNESS", os.environ.get("OAAX_HARNESS"))):
+        if path:
+            if not Path(path).is_file():
+                raise FileNotFoundError(f"{source} {path}: no such file")
+            return str(Path(path).resolve())
+    for candidate in (packaged_harness(), CHECKOUT_HARNESS):
+        if candidate.is_file():
+            return str(candidate)
+    raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: this install has none (a Linux wheel contains it; a macOS, Windows or source install "
+                            "does not). Use the Linux wheel, or build it (scripts/build.sh) and pass --harness PATH or set OAAX_HARNESS")
 
 
 def _is_utf8(raw: bytes) -> bool:

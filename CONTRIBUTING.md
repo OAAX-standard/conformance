@@ -39,7 +39,15 @@ To build them from an image you already have instead of pulling `python:3.11-sli
 The `build` workflow then:
 
 - checks that the tag is a commit of `main`, matches the version, and that the CHANGELOG heading is dated;
-- builds and smoke-tests the wheel (specs inside, exit codes);
-- creates a **draft** GitHub Release with the wheel, the checksums and the CHANGELOG notes, for a maintainer to review and publish.
+- builds the wheel of each architecture (x86_64, aarch64) with `scripts/build-wheel.sh` (a manylinux container; the C harness is inside), checks it (`auditwheel show`, `twine check`) and smoke-tests it in a bare container without a compiler (the whole runtime tier on the published CPU runtime);
+- creates a **draft** GitHub Release with all wheels, one `SHA256SUMS` and the CHANGELOG notes, for a maintainer to review.
 
-A re-run refuses if a release for the tag exists. Nothing goes to PyPI.
+Then, to publish:
+
+4. Press **Publish** on the draft. That starts `publish.yml`, which waits for the reviewer of the `pypi` environment and uploads the release's wheels (not a rebuild) with trusted publishing.
+
+One-time setup: a PyPI trusted publisher (project `oaax-conformance`, owner `OAAX-standard`, repository `conformance`, workflow `publish.yml`, environment `pypi`).
+
+A re-run refuses if a release for the tag exists. No sdist is released: the wheels are the product.
+
+Build a release wheel locally: `scripts/build-wheel.sh` (Docker; the wheel of this machine's architecture goes to `dist/`).

@@ -673,7 +673,9 @@ def test_the_readme_gives_the_python_the_wheel_needs():
     from pathlib import Path
 
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
-    assert "uv tool install --python 3.12 oaax_conformance" in readme and "[e2e]" not in readme
+    assert "uv tool install --python 3.12 'oaax-conformance[e2e]'" in readme  # every tier now: the extras are the only thing to add
+    assert "uv tool install --python 3.12 'oaax_conformance-X.Y.Z-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl[e2e]'" in readme
+    assert "does **not** contain the C harness" not in readme
 
 
 # ---- round 5, A11: a PASS that rests on less than the specified work says so -----------------------------------------------------------------
@@ -1069,3 +1071,12 @@ def test_the_documents_match_the_code_on_timeouts_safe_reads_and_rt_m_34():
         assert number in sentence, number  # the caps in the document are the caps in the code
     readme, tests_doc = (root / "README.md").read_text(), (root / "docs" / "tests" / "runtime-model.md").read_text()
     assert "WARN, sometimes PASS" in readme and "4 WARN, 1 PASS in 5 runs" in tests_doc
+
+
+def test_the_readme_has_no_relative_links():
+    """PyPI renders README.md as the project page, where a relative link (CHANGELOG.md) is broken: links are absolute URLs or in-page anchors."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
+    assert relative == []

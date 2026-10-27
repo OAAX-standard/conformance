@@ -10,6 +10,18 @@ readme = "README.md"
 requires-python = ">=3.12"  # CI runs 3.13 (security fixes until October 2029)
 license = { text = "Apache-2.0" }
 dependencies = ["jsonschema"]
+keywords = ["oaax", "ai", "accelerator", "conformance", "onnx"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-xdist", "pyyaml"]
@@ -19,6 +31,13 @@ e2e = ["onnx", "onnxruntime", "numpy"]
 [dependency-groups]
 dev = ["oaax-conformance[test,onnx,e2e]"]
 
+[project.urls]
+Homepage = "https://github.com/OAAX-standard/conformance"
+Documentation = "https://github.com/OAAX-standard/conformance/blob/main/docs/reference.md"
+Issues = "https://github.com/OAAX-standard/conformance/issues"
+Changelog = "https://github.com/OAAX-standard/conformance/blob/main/CHANGELOG.md"
+Specification = "https://oaax-standard.github.io/OAAX/Specification/"
+
 [project.scripts]
 oaax-conformance = "oaax_conformance.cli:main"
 
@@ -27,6 +46,9 @@ path = "python/oaax_conformance/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/oaax_conformance"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+# hatch_build.py compiles the C harness into the wheel (see docs/design.md, Distribution)
 
 [tool.hatch.build.targets.wheel.force-include]
 "docs/tests" = "oaax_conformance/test_specs"
