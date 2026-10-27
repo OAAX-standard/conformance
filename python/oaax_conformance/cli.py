@@ -165,6 +165,18 @@ def _print_and_write(suite, args, title: str, document, paths: list[str], secret
     return report.exit_code(suite.results)
 
 
+# What dlerror() says for a file that is not a shared library for this machine (a missing dependency says "cannot open shared object file" and is the suite's business).
+NOT_A_LIBRARY = ("file too short", "invalid ELF header", "not a dynamic executable", "cannot dynamically load", "wrong ELF class", "ELF load command", "not an ELF")
+
+
+def _not_a_library(ctx) -> str | None:
+    run = ctx.run("static")  # RT-S-01's own scenario: it only loads the library and looks up the nine exports
+    text = run.dlopen_error() if run.end == "dlopen" else ""
+    if any(pattern in text for pattern in NOT_A_LIBRARY):
+        return f"{ctx.lib} is not a loadable runtime library ({text.replace(f"{ctx.lib}: ", "")}): pass the libRuntimeLibrary.so built for this machine"
+    return None
+
+
 def _runtime(args) -> int:
     lib = str(Path(args.library).resolve())
     model = str(Path(args.model).resolve()) if args.model else None
@@ -173,6 +185,9 @@ def _runtime(args) -> int:
                       workdir=str(Path(args.workdir).resolve()) if args.workdir else None, progress=not args.quiet)
     except FileNotFoundError as e:
         return usage_error(str(e))
+    problem = _not_a_library(ctx)
+    if problem:  # 60 BLOCKED rows and a wrong hint would hide this one line
+        return usage_error(problem)
     skip = {i: "skipped by request (--skip)" for i in args.skip}
     if args.hardware_safe:
         ctx.hardware_safe()

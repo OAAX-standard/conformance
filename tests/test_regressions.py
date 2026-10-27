@@ -774,3 +774,27 @@ def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
         text = (root / name).read_text()
         assert "(no network, read-only mounts, unprivileged user)" not in text and "without network, with read-only mounts" not in text
     assert "--cap-drop ALL" in (root / "README.md").read_text() and "TC-03" in (root / "SECURITY.md").read_text()
+
+
+# ---- round 5, A16: a file that is not a runtime library is one line, not 60 BLOCKED rows -----------------------------------------------------------
+
+@pytest.mark.parametrize("kind,cause", [("empty", "file too short"), ("text", "file too short|invalid ELF header"), ("executable", "cannot dynamically load|not a dynamic executable"),
+                                        ("elf32", "wrong ELF class")])
+def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path, capsys, kind, cause):
+    """A16: a 0-byte file, a text file or an executable as the "runtime" gave 60+ BLOCKED rows, exit 2 and a wrong "set LD_LIBRARY_PATH" hint."""
+    import shutil
+
+    path = tmp_path / "libRuntimeLibrary.so"
+    if kind == "empty":
+        path.write_bytes(b"")
+    elif kind == "text":
+        path.write_text("this is not a library\n" * 20)
+    elif kind == "executable":
+        shutil.copy(shutil.which("true"), path)
+    else:
+        data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+        data[4] = 1  # ELFCLASS32
+        path.write_bytes(bytes(data))
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    err = capsys.readouterr().err.strip()
+    assert re.search(cause, err) and "LD_LIBRARY_PATH" not in err and len(err.splitlines()) == 1 and "BLOCKED" not in err
