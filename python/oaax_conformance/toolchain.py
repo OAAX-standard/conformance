@@ -471,7 +471,10 @@ class ToolchainContext:
             shutil.rmtree(dump, ignore_errors=True)
 
     def _make_removable(self, ws: Workspace) -> None:
-        cmd = ["docker", "run", "--rm", "--user", "0", "--network", "none", "-v", f"{ws.root}:/w", "--entrypoint", "chmod", self.image, "-R", "a+rwX", "/w"]
+        # As root, but with the sandbox of every other run: chmod of files another uid owns needs only these two capabilities (FOWNER to change the mode, DAC_OVERRIDE to
+        # enter a directory of mode 000).
+        cmd = ["docker", "run", "--rm", "--user", "0", "--network", "none", "--cap-drop", "ALL", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE",
+               "--security-opt", "no-new-privileges", "--pids-limit", "4096", "-v", f"{ws.root}:/w", "--entrypoint", "chmod", self.image, "-R", "a+rwX", "/w"]
         subprocess.run(cmd, capture_output=True, timeout=120)  # best effort: an image without chmod simply leaves the directory
 
 

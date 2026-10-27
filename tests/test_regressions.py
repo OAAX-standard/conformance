@@ -969,7 +969,7 @@ def test_the_changelog_counts_the_review_rounds_that_were_run():
     from pathlib import Path
 
     text = Path(__file__).resolve().parent.parent.joinpath("CHANGELOG.md").read_text()
-    assert "six adversarial review rounds" in text and "five adversarial" not in text
+    assert "seven adversarial review rounds" in text and "six adversarial" not in text and "five adversarial" not in text
 
 
 # ---- round 7 (D6): flags that take `docker run` out of the foreground are refused up front ----------------------------------------------------
@@ -1049,3 +1049,23 @@ def test_an_executable_given_as_the_toolchain_runtime_is_one_line(build_dir, tmp
         assert expect in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
     assert cli.main(["runtime", str(et_exec), "--harness", str(build_dir / "oaax-harness")]) == 3  # and `runtime LIB` agrees
     assert "is an executable" in capsys.readouterr().err
+
+
+# ---- round 7 (D10): the documents say what the code does and what the reference does today ------------------------------------------------------
+
+def test_the_documents_match_the_code_on_timeouts_safe_reads_and_rt_m_34():
+    from pathlib import Path
+
+    from oaax_conformance import safefile, toolchain
+
+    root = Path(__file__).resolve().parent.parent
+    reference = (root / "docs" / "reference.md").read_text()
+    assert "runtime: per scenario, default 300; toolchain: per conversion, default 900" in reference
+    parser_help = cli.build_parser().format_help() + "".join(a.format_help() for a in cli.build_parser()._subparsers._group_actions[0].choices.values())
+    assert "per scenario (runtime, default 300) or per conversion (toolchain, default 900)" in " ".join(parser_help.split())
+    sentence = next(l for l in reference.splitlines() if l.startswith("- Files a toolchain writes are never opened"))
+    for number in (f"{safefile.MAX_JSON_BYTES >> 20} MB", f"{safefile.MAX_MODEL_BYTES >> 30} GiB", f"{toolchain.HASH_LIMIT >> 20} MiB",
+                   f"{toolchain.MAX_TREE_DEPTH} levels", f"{toolchain.MAX_TREE_ENTRIES:,}".replace(",", " ") + " entries"):
+        assert number in sentence, number  # the caps in the document are the caps in the code
+    readme, tests_doc = (root / "README.md").read_text(), (root / "docs" / "tests" / "runtime-model.md").read_text()
+    assert "WARN, sometimes PASS" in readme and "4 WARN, 1 PASS in 5 runs" in tests_doc

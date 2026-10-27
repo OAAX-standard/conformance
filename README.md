@@ -121,7 +121,8 @@ The reference CPU runtime and toolchain have known issues ([#45](https://github.
 | runtime | `RT-L-11` | WARN | exit without `cleanup` crashes |
 | runtime | `RT-M-19`, `-21`, `-23`, `-25` | FAIL | requests that do not match the model are accepted and lost |
 | runtime | `RT-M-20`, `-22`, `-24` | N/A | one input with this model: nothing to leave out |
-| runtime | `RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32`, `-34` | WARN | |
+| runtime | `RT-L-13`/`-14`/`-15`, `RT-M-26`, `-32` | WARN | |
+| runtime | `RT-M-34` | WARN, sometimes PASS | `requests_in_flight` is read while the runtime drains its queue (it reports 1 or 2 where 3 requests are unretrieved): a race, about one run in five passes. The totals therefore vary between runs: 47 pass, 7 warn, 4 fail, 1 blocked, 3 n/a, or 48 pass, 6 warn |
 | runtime | `RT-M-17` | BLOCKED | the tiny model answers faster than the suite can time |
 | runtime | `RT-M-35` | varies | memory growth is an RSS measurement (#47): a 1 MB face detector grows 12 MB, other models do not, so a PASS is weaker than a FAIL |
 | toolchain | `TC-30` | FAIL | an empty `.onnx` is accepted |

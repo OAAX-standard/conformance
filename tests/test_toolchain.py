@@ -646,3 +646,31 @@ def test_a_manifest_that_names_a_link_is_not_valid_and_the_end_to_end_tests_agre
     assert [i for i, r in results.items() if r.outcome == "error"] == []
     assert "(the only file)" in results["E2E-01"].note  # the unusable manifest is not used to choose, nor to describe, the file
     assert results["E2E-03"].outcome != "pass"  # not judged against a manifest that does not describe the judged file
+
+
+# ---- round 7 (D9): the cleanup container keeps the sandbox ----------------------------------------------------------------------------------
+
+def test_the_cleanup_container_runs_with_the_sandbox_and_still_removes_what_another_uid_made(build_dir, mock_io_onnx, toolchain_images, tmp_path, monkeypatch):
+    """D9: the container that opens up undeletable output ran as root WITHOUT the flags the README says every run has."""
+    import os
+    import subprocess
+
+    from oaax_conformance.toolchain import Workspace
+
+    ctx = _context(build_dir, mock_io_onnx, CLEAN, None, tmp_path)
+    ws = Workspace.create()
+    ctx.workspaces.append(ws)
+    made = subprocess.run(["docker", "run", "--rm", "--user", "12345:12345", "-v", f"{ws.out_dir}:/out", "--entrypoint", "sh", CLEAN, "-c",
+                           "mkdir -m 700 /out/sub && mkdir -m 000 /out/sub/locked && touch /out/sub/f && chmod 000 /out/sub/f && chmod 500 /out/sub"],
+                          capture_output=True, text=True)
+    assert made.returncode == 0, made.stderr
+    assert (ws.out_dir / "sub").exists() and not os.access(ws.out_dir / "sub", os.W_OK)  # the host user cannot remove it
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **k: (seen.append(list(cmd)), real(cmd, *a, **k))[1])
+    ctx.close()
+    assert not ws.root.exists() and ctx.leftovers == []  # removed, with only FOWNER and DAC_OVERRIDE
+    cleanup = next(c for c in seen if "--entrypoint" in c and "chmod" in c)
+    joined = " ".join(cleanup)
+    assert "--cap-drop ALL" in joined and "--cap-add FOWNER" in joined and "--cap-add DAC_OVERRIDE" in joined
+    assert "--security-opt no-new-privileges" in joined and "--pids-limit 4096" in joined and "--network none" in joined
