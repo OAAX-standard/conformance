@@ -34,6 +34,20 @@ def test_the_current_version_has_a_section_in_the_changelog():
     assert tool.changelog_section(__version__, (ROOT / "CHANGELOG.md").read_text())
 
 
+SUMS = ("a3c0  oaax_conformance-1.2.3-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl\n"
+        "cbc1  oaax_conformance-1.2.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl\n")
+
+
+def test_the_install_line_names_a_wheel_that_is_in_the_release():
+    """0.1.1 shipped `./oaax_conformance-0.1.1-py3-none-any.whl`: a file that does not exist (the wheels are platform wheels)."""
+    line = tool.install_line(SUMS)
+    assert "./oaax_conformance-1.2.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl[e2e]" in line
+    assert "py3-none-any" not in line and "'oaax-conformance[e2e]'" in line
+    assert "aarch64.manylinux2014_aarch64.whl[e2e]" in tool.install_line(SUMS.splitlines()[0])  # an arm-only release falls back to what is there
+    with pytest.raises(SystemExit, match="no wheel"):
+        tool.install_line("abcd  oaax-conformance.tar.gz\n")
+
+
 PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} +# v\d+(\.\d+)*")  # owner/repo@<full commit SHA> # v<version>
 
 

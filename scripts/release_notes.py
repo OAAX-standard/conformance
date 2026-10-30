@@ -39,14 +39,21 @@ def changelog_section(version: str, text: str, final: bool = False) -> str:
     return section
 
 
+def install_line(sums: str) -> str:
+    """The wheel names come from SHA256SUMS: they are platform wheels (manylinux, one per architecture), so a hard-coded name is wrong."""
+    wheels = [line.split()[-1] for line in sums.splitlines() if line.strip().endswith(".whl")]
+    if not wheels:
+        raise SystemExit("SHA256SUMS lists no wheel: nothing to build the install line from")
+    wheel = next((w for w in wheels if "x86_64" in w), wheels[0])
+    return (
+        "Install from PyPI: `uv tool install --python 3.12 'oaax-conformance[e2e]'`, or from the files of this release: "
+        f"`uv tool install --python 3.12 './{wheel}[e2e]'` (the `aarch64` wheel on an arm machine). Verify the download against the checksums above.\n"
+    )
+
+
 def notes(version: str, sums: str, final: bool = False) -> str:
     section = changelog_section(version, (ROOT / "CHANGELOG.md").read_text(), final)
-    return (
-        f"{section}\n\n"
-        "## Checksums (sha256)\n\n"
-        f"```\n{sums.strip()}\n```\n\n"
-        f"Install: `uv tool install --python 3.12 ./oaax_conformance-{version}-py3-none-any.whl`. Verify the download against the checksums above.\n"
-    )
+    return f"{section}\n\n## Checksums (sha256)\n\n```\n{sums.strip()}\n```\n\n{install_line(sums)}"
 
 
 if __name__ == "__main__":
