@@ -5,7 +5,7 @@
 Please do not report security vulnerabilities in public issues, discussions or pull requests.
 
 1. Use GitHub's private reporting: open the **Security** tab of this repository and choose **Report a vulnerability**. Only the maintainers can see the report.
-2. If the button is not there (private repositories may not offer it), open an issue that says only "security contact needed", without details; a maintainer will reply with a private channel.
+2. If the button is not there (private repositories may not offer it), email **security@oaax.org** with the same details.
 3. Include the affected version (`oaax-conformance --version`), the steps to reproduce, and the impact you expect.
 
 ## Scope

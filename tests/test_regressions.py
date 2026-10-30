@@ -1088,6 +1088,7 @@ def test_the_pypi_readme_is_the_pypi_page():
 
     root = Path(__file__).resolve().parent.parent
     assert 'readme = "README.pypi.md"' in (root / "pyproject.toml").read_text()
+    assert 'email = "pypi@oaax.org"' in (root / "pyproject.toml").read_text()  # the PyPI maintainer contact is the role mailbox
     text = (root / "README.pypi.md").read_text()
     relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
     assert relative == []
