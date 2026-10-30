@@ -18,7 +18,7 @@ body:
     id: version
     attributes:
       label: Output of `oaax-conformance --version`
-      placeholder: "oaax-conformance 0.1.0"
+      placeholder: "oaax-conformance 0.1.1"
     validations:
       required: true
   - type: input

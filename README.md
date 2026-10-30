@@ -3,7 +3,7 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: 0.1.0, Linux only.** Every test is specified in [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
+> **Status: 0.1, Linux only.** Every test is specified in [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
 
 ## Quick start
 

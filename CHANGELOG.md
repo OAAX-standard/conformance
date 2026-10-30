@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 - 2026-10-30
+
+- The PyPI project page has its own, shorter readme (`README.pypi.md`): what the suite checks, install, usage, exit codes, links. The GitHub README is unchanged. No change to the checks or the harness.
+
 ## 0.1.0 - 2026-10-27
 
 First release.
