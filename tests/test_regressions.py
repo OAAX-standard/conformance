@@ -1080,3 +1080,16 @@ def test_the_readme_has_no_relative_links():
     text = (Path(__file__).resolve().parent.parent / "README.md").read_text()
     relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
     assert relative == []
+
+
+def test_the_pypi_readme_is_the_pypi_page():
+    """PyPI shows README.pypi.md: its links are absolute (a relative one is broken there) and no markdown link sits in a code block (it would show raw)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    assert 'readme = "README.pypi.md"' in (root / "pyproject.toml").read_text()
+    text = (root / "README.pypi.md").read_text()
+    relative = [t for t in re.findall(r"\]\(([^)\s]+)\)", text) if not t.startswith(("http://", "https://", "#", "mailto:"))]
+    assert relative == []
+    for block in text.split("```")[1::2]:
+        assert "](" not in block

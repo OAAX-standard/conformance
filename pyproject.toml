@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "oaax-conformance"
 dynamic = ["version"]
 description = "OAAX conformance suite: checks a runtime (shared library) or a toolchain (Docker image) against the specification"
-readme = "README.md"
+readme = "README.pypi.md"  # the PyPI page; the GitHub README is longer
 requires-python = ">=3.12"  # CI runs 3.13 (security fixes until October 2029)
 license = { text = "Apache-2.0" }
 dependencies = ["jsonschema"]
