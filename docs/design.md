@@ -28,7 +28,7 @@ itself and must not need the host's Docker socket handed to another container.
   An sdist builds (a pure wheel without cmake, with the harness when cmake exists) but is not released. macOS has no harness: the CLI says so (exit 3).
 - **Windows (2026-11-14):** the runtime tier only; the toolchain tier tests Linux containers and says so (exit 3). All operating-system calls live in `harness/src/platform.c` (LoadLibrary, Win32 threads, Toolhelp, private bytes instead of RSS);
   the mock runtime is built with MSVC (`/EXPORT`), checked in CI on `windows-latest`. A crash is named by its exception code (`ACCESS_VIOLATION`); RT-S-02 reads the PE export table. The harness frees what the runtime allocated with
-  its own `free` (dynamic UCRT, `/MD`): a runtime built with another CRT can crash there, which is a finding about the runtime. A Windows wheel (`win_amd64`) builds with the same hook but is not in the release workflow yet.
+  its own `free` (dynamic UCRT, `/MD`): a runtime built with another CRT can crash there, which is a finding about the runtime. The `win_amd64` wheel is built by the same hook on a `windows-latest` runner and released next to the Linux ones (Windows arm64: no wheel, no reference runtime to smoke-test).
   Limits: Windows has no SIGTERM/SIGHUP handling (Ctrl-C works and stops the harness and its helpers with `taskkill /T`; a suite killed from outside leaves the harness to finish), and the POSIX-only faults of the mock (fork, a non-UTF-8 thread name, a linker version script) are not exercised.
 - The toolchain tier needs Docker on the machine running the suite, because a toolchain *is* a Docker image.
 

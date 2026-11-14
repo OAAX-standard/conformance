@@ -6,11 +6,11 @@ A pass means: *this runtime or toolchain can be swapped for another one without 
 - **Strict:** talks to the runtime's C API directly, never through a tolerant wrapper.
 - **Each failure says what to fix:** it names the specification clause.
 - **Safe on real hardware:** time-budgeted loops, capped request sizes, a slow device is `BLOCKED` and never `FAIL`, `--hardware-safe` leaves out the abusive tests.
-- **No compiler needed:** the wheel contains the C harness (Linux x86_64 and aarch64).
+- **No compiler needed:** the wheel contains the C harness (Linux x86_64 and aarch64, Windows x64).
 
 ## Install
 
-Needs [uv](https://docs.astral.sh/uv/) on Linux (the runtime tier also runs on Windows from a checkout, see the GitHub readme), and Docker to test toolchains. The wheel needs Python 3.12 or newer; uv fetches it if your default is older.
+Needs [uv](https://docs.astral.sh/uv/) on Linux (the runtime tier also runs on Windows x64), and Docker to test toolchains. The wheel needs Python 3.12 or newer; uv fetches it if your default is older.
 
 ```bash
 uv tool install --python 3.12 'oaax-conformance[e2e]'
