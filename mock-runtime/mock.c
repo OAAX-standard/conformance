@@ -4,20 +4,78 @@
 // A "model" is a file that starts with MOCKMODEL. It takes two inputs, "x" FLOAT [1,4] and "scale" FLOAT [1], and returns
 // "y" FLOAT [1,4] (= x * scale) and "sum" FLOAT [1]; a request takes 5 ms. Build variants (CMakeLists.txt) cover missing and
 // extra exports. The faults are listed next to the code they change.
-#include <signal.h>
-#include <dlfcn.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "interface.h"
 
+// The few operating-system calls the mock needs: a mutex, a condition variable, a clock, sleeping, a thread. Faults that exist only on
+// POSIX (fork, a thread name that is not UTF-8) are compiled out on Windows; the checks that need them skip there.
+#ifdef _MSC_VER
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL __thread
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define access _access
+#define R_OK 4
+#ifdef _MSC_VER
+#define EXPORT  // exported by the linker (CMakeLists.txt: /EXPORT): MSVC refuses dllexport after the header's prototypes
+#else
+#define EXPORT __declspec(dllexport)
+#endif
+typedef CRITICAL_SECTION mutex_t;
+typedef CONDITION_VARIABLE cond_t;
+#define LOCK(m) EnterCriticalSection(&(m))
+#define UNLOCK(m) LeaveCriticalSection(&(m))
+#define WAKE_ALL(c) WakeAllConditionVariable(&(c))
+#define WAIT_FOREVER(c, m) SleepConditionVariableCS(&(c), &(m), INFINITE)
+#define WAIT_MS(c, m, ms) SleepConditionVariableCS((c), (m), (DWORD)((ms) < 1 ? 1 : (ms) + 1))
+static double now_ms(void) {
+  LARGE_INTEGER f, c;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&c);
+  return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+static void sleep_ms(int ms) { Sleep((DWORD)ms); }
+#else
+#include <dlfcn.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
 #define EXPORT __attribute__((visibility("default")))
+typedef pthread_mutex_t mutex_t;
+typedef pthread_cond_t cond_t;
+#define LOCK(m) pthread_mutex_lock(&(m))
+#define UNLOCK(m) pthread_mutex_unlock(&(m))
+#define WAKE_ALL(c) pthread_cond_broadcast(&(c))
+#define WAIT_FOREVER(c, m) pthread_cond_wait(&(c), &(m))
+static double now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+static void sleep_ms(int ms) {
+  struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+  nanosleep(&ts, NULL);
+}
+static void WAIT_MS(cond_t *c, mutex_t *m, double ms) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += (time_t)(ms / 1000);
+  ts.tv_nsec += (long)((ms - (long)(ms / 1000) * 1000) * 1e6);
+  if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
+  pthread_cond_timedwait(c, m, &ts);
+}
+#endif
+
 #define MAX_MODELS 8
 #define INFERENCE_MS 5
 
@@ -36,18 +94,17 @@ struct Request {
 };
 static struct Request *head, *tail;
 static int queued;
-static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
+#ifdef _WIN32
+static mutex_t lock;  // initialised by DllMain
+static cond_t changed;
+#else
+static mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static cond_t changed = PTHREAD_COND_INITIALIZER;
+#endif
 
 static int fault(const char *name) {
   const char *f = getenv("OAAX_MOCK_FAULT");
   return f && !strcmp(f, name);
-}
-
-static double now_ms(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
 // A real leak: the volatile sink stops the compiler from deleting an allocation nobody uses.
@@ -56,11 +113,6 @@ static void leak(size_t bytes) {
   char *p = malloc(bytes);
   memset(p, 1, bytes);
   leak_sink = p;
-}
-
-static void sleep_ms(int ms) {
-  struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
-  nanosleep(&ts, NULL);
 }
 
 static RuntimeStatus fail(RuntimeStatus status, const char *message) {
@@ -72,12 +124,20 @@ static RuntimeStatus fail(RuntimeStatus status, const char *message) {
   return status;
 }
 
+#ifdef _WIN32
+static DWORD WINAPI idle_thread(LPVOID arg) {
+  (void)arg;
+  for (;;) Sleep(1000);
+  return 0;
+}
+#else
 static void *idle_thread(void *arg) {
   (void)arg;
   pthread_setname_np(pthread_self(), fault("bad_thread_name") ? "\xff" "\x01" "bad" : "mock-worker");
   for (;;) pause();
   return NULL;
 }
+#endif
 
 // A call while not initialized (before init, or after cleanup): NOT_INITIALIZED, unless a fault says otherwise.
 static RuntimeStatus not_initialized(void) {
@@ -107,24 +167,35 @@ EXPORT RuntimeStatus runtime_init(Config config) {
     for (int i = 0; i < 400; i++) fprintf(stderr, "mock runtime: noisy line %03d ......................................................\n", i);
     fflush(stderr);
   }
+#ifndef _WIN32
   if (fault("daemonize") && fork() == 0) {  // a helper process that keeps the inherited stdout/stderr open
     sleep(300);
     _exit(0);
   }
+#endif
   for (int i = 0; i < config.length; i++)
     if (fault("reject_unknown_key") && !strcmp(config.keys[i], "oaax_conformance_unknown_key"))
       return fail(RUNTIME_STATUS_INVALID_ARGUMENT, "unknown key");
   if (cleaned_once && fault("no_reinit")) return fail(RUNTIME_STATUS_ERROR, "cannot re-initialize");
 
   if (fault("leak_thread") || fault("bad_thread_name")) {
+#ifdef _WIN32
+    CloseHandle(CreateThread(NULL, 0, idle_thread, NULL, 0, NULL));
+#else
     pthread_t t;
     pthread_create(&t, NULL, idle_thread, NULL);
     pthread_detach(t);
+#endif
   }
   if (fault("leak_memory")) leak(2 << 20);
   if (fault("pin_library")) {
+#ifdef _WIN32
+    HMODULE self;  // the Windows way to make FreeLibrary a no-op
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)runtime_init, &self);
+#else
     Dl_info info;
     if (dladdr((void *)runtime_init, &info)) dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+#endif
   }
   initialized = 1;
   load_broken = 0;
@@ -144,13 +215,13 @@ static void drop_queue(void) {
 }
 
 EXPORT RuntimeStatus runtime_cleanup(void) {
-  if (fault("crash_in_cleanup")) raise(SIGSEGV);
+  if (fault("crash_in_cleanup")) *(volatile int *)0 = 1;  // a segmentation fault / access violation
   if (queued && fault("slow_cleanup")) sleep_ms(1200);  // the spec sets no bound for cleanup: slow is not wrong
   if (!initialized && fault("cleanup_not_idempotent")) return fail(RUNTIME_STATUS_ERROR, "not initialized");
   if (!initialized && cleaned_once && fault("cleanup_twice_fails")) return fail(RUNTIME_STATUS_ERROR, "already cleaned up");
-  pthread_mutex_lock(&lock);
+  LOCK(lock);
   if (queued && fault("cleanup_fails_inflight")) {
-    pthread_mutex_unlock(&lock);
+    UNLOCK(lock);
     return fail(RUNTIME_STATUS_ERROR, "requests in flight");
   }
   initialized = 0;
@@ -159,8 +230,8 @@ EXPORT RuntimeStatus runtime_cleanup(void) {
   cleaned_once = 1;
   generation++;
   drop_queue();
-  if (!fault("no_wakeup")) pthread_cond_broadcast(&changed);  // a blocked retrieve_output must return
-  pthread_mutex_unlock(&lock);
+  if (!fault("no_wakeup")) WAKE_ALL(changed);  // a blocked retrieve_output must return
+  UNLOCK(lock);
   return RUNTIME_STATUS_SUCCESS;
 }
 
@@ -305,7 +376,7 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     r->ready_ms = now_ms() + (fault("slow_request") ? 150 : INFERENCE_MS) + (fault("slow_first") && !first_request_done ? 3000 : 0) + (fault("slow_every") ? 3000 : 0);
     first_request_done = 1;
   }
-  pthread_mutex_lock(&lock);
+  LOCK(lock);
   accepted_total++;
   int drop = (fault("concurrency_drop") && queued >= 2 && accepted_total % 3 == 0)  /* only under a backlog */ || (fault("flood_lost") && queued > 50);
   if (r && !drop && !fault("drop_all")) {
@@ -313,9 +384,9 @@ EXPORT RuntimeStatus runtime_enqueue_input(int model_id, Tensors *input) {
     else head = r;
     tail = r;
     queued++;
-    pthread_cond_broadcast(&changed);
+    WAKE_ALL(changed);
   } else free(r);
-  pthread_mutex_unlock(&lock);
+  UNLOCK(lock);
   free_input(input);  // success: the runtime owns the input
   return RUNTIME_STATUS_SUCCESS;
 }
@@ -375,40 +446,33 @@ EXPORT RuntimeStatus runtime_retrieve_output(int *model_id, Tensors **output_ten
   if (timeout_ms == 0 && !head && !hiccup_done && fault("retrieve0_hiccup")) hiccup_done = 1, sleep_ms(300);
   double started = now_ms(), deadline = timeout_ms > 0 ? started + timeout_ms : 0;
   int gen = generation;
-  pthread_mutex_lock(&lock);
+  LOCK(lock);
   for (;;) {
     double now = now_ms();
     if (!fault("no_wakeup") && gen != generation) {
-      pthread_mutex_unlock(&lock);
+      UNLOCK(lock);
       return fail(RUNTIME_STATUS_NOT_INITIALIZED, "cleaned up while waiting");
     }
     if (head && head->ready_ms <= now) break;
     if (timeout_ms == 0 || (timeout_ms < 0 && fault("negative_no_wait")) || (timeout_ms > 0 && fault("retrieve_returns_early") && !head)) {
-      pthread_mutex_unlock(&lock);
+      UNLOCK(lock);
       return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
     }
     double limit = timeout_ms > 0 ? deadline + (fault("retrieve_timeout_long") ? 3000 : 0) : 0;
     if (timeout_ms > 0 && now >= limit) {
-      pthread_mutex_unlock(&lock);
+      UNLOCK(lock);
       return RUNTIME_STATUS_NO_OUTPUT_AVAILABLE;
     }
     double wake = head ? head->ready_ms : limit;  // wake when the head request is ready, or at the deadline
     if (head && limit && limit < wake) wake = limit;
-    if (wake) {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      double delta = wake - now;
-      ts.tv_sec += (time_t)(delta / 1000);
-      ts.tv_nsec += (long)((delta - (long)(delta / 1000) * 1000) * 1e6);
-      if (ts.tv_nsec >= 1000000000L) ts.tv_sec++, ts.tv_nsec -= 1000000000L;
-      pthread_cond_timedwait(&changed, &lock, &ts);
-    } else pthread_cond_wait(&changed, &lock);
+    if (wake) WAIT_MS(&changed, &lock, wake - now);
+    else WAIT_FOREVER(changed, lock);
   }
   struct Request *r = head;
   head = r->next;
   if (!head) tail = NULL;
   queued--;
-  pthread_mutex_unlock(&lock);
+  UNLOCK(lock);
   *model_id = r->model_id;
   *output_tensors = make_output(r);
   if (fault("null_tensors")) (*output_tensors)->tensors = NULL;  // a count with no array
@@ -437,13 +501,13 @@ EXPORT const char *runtime_get_name(void) {
 
 #ifndef MOCK_OMIT_INFO
 EXPORT const char *runtime_get_info(void) {
-  static __thread char info[128];
+  static THREAD_LOCAL char info[128];
   if (initialized) {
     if (fault("info_not_json")) return "not json";
-    pthread_mutex_lock(&lock);
+    LOCK(lock);
     snprintf(info, sizeof info, "{\"loaded_models\":%d,\"requests_in_flight\":%d}", fault("info_stale") ? 0 : num_models,
              fault("info_stale") ? 0 : queued);
-    pthread_mutex_unlock(&lock);
+    UNLOCK(lock);
     return info;
   }
   if (fault("info_before_init") || (cleaned_once && fault("info_after_cleanup"))) return "{}";
@@ -455,6 +519,16 @@ EXPORT const char *runtime_get_info(void) {
 EXPORT int mock_extra_symbol(void) { return 1; }
 #endif
 
-__attribute__((destructor)) static void at_exit(void) {
+static void at_exit(void) {
   if ((initialized && fault("crash_at_exit")) || fault("crash_after_end")) abort();
 }
+#ifdef _WIN32
+BOOL WINAPI DllMain(HINSTANCE dll, DWORD reason, LPVOID reserved) {
+  (void)dll;
+  if (reason == DLL_PROCESS_ATTACH) InitializeCriticalSection(&lock), InitializeConditionVariable(&changed);
+  if (reason == DLL_PROCESS_DETACH && reserved) at_exit();  // reserved != NULL: the process is ending (the library's destructors of a normal exit)
+  return TRUE;
+}
+#else
+__attribute__((destructor)) static void at_exit_hook(void) { at_exit(); }
+#endif

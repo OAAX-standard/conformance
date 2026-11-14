@@ -1,18 +1,33 @@
 import json
 import os
+import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+WINDOWS = sys.platform == "win32"
+EXE = ".exe" if WINDOWS else ""
+HARNESS = f"oaax-harness{EXE}"
+posix_only = pytest.mark.skipif(WINDOWS, reason="needs POSIX: fork, ELF files, signals, fifos, symlinks, chmod, or the toolchain tier (Linux containers)")
+
+
+def lib_name(variant: str) -> str:
+    """The file name CMake gives a mock runtime: libmock_runtime.so on Linux, mock_runtime.dll on Windows."""
+    return f"{variant}.dll" if WINDOWS else f"lib{variant}.so"
+
+
 BUILD = Path(os.environ.get("OAAX_BUILD_DIR", ROOT / "build")).resolve()  # CI points it at a sanitizer build
 
 
 @pytest.fixture(scope="session")
 def build_dir() -> Path:
-    if not (BUILD / "oaax-harness").exists():
-        subprocess.run([str(ROOT / "scripts" / "build.sh")], check=True, capture_output=True)
+    if not (BUILD / HARNESS).exists():
+        subprocess.run(["cmake", "-S", str(ROOT), "-B", str(BUILD), "-DCMAKE_BUILD_TYPE=Release"], check=True, capture_output=True)
+        subprocess.run(["cmake", "--build", str(BUILD), "--config", "Release", "--parallel"], check=True, capture_output=True)
     tensor = lambda name, shape: {"name": name, "native": {"dtype": "FLOAT", "shape": shape, "layout": "X" * len(shape)}}  # noqa: E731
     manifest = {"model_file": "mock.model", "inputs": [tensor("x", [1, 4]), tensor("scale", [1])], "outputs": [tensor("y", [1, 4]), tensor("sum", [1, 1])]}
     _write_atomically(BUILD / "mock.model", b"MOCKMODEL: the only kind of model the mock runtime loads")
@@ -22,12 +37,19 @@ def build_dir() -> Path:
 
 def _write_atomically(path: Path, data: bytes) -> None:
     """Every xdist worker runs this fixture while the others already run tests that read these files: a plain write_bytes truncates the file first and a
-    reader sees it empty or half written (this made a CI run find the model 'blocked'). Write a temporary file, then rename it over the target."""
-    if path.exists() and path.read_bytes() == data:
-        return
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    reader sees it empty or half written (this made a CI run find the model 'blocked'). Write a temporary file, then rename it over the target.
+    Windows refuses to replace or read a file another worker has open (PermissionError): the bytes are the same everywhere, so retry until the file holds them."""
+    for _ in range(100):
+        try:
+            if path.exists() and path.read_bytes() == data:
+                return
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.1)
+    raise PermissionError(path)
 
 
 IMAGES = {  # image reference -> Dockerfile target
@@ -40,8 +62,9 @@ IMAGES = {  # image reference -> Dockerfile target
 @pytest.fixture(scope="session")
 def toolchain_images(tmp_path_factory):
     """Build the mock toolchain images once per test run (workers wait for each other); skip when Docker is not there."""
+    if WINDOWS:
+        pytest.skip("the toolchain tier tests Linux containers: it runs on Linux")
     import fcntl
-    import os
 
     from oaax_conformance.toolchain import docker_available
 
@@ -82,5 +105,5 @@ def mock_io_onnx(tmp_path_factory) -> str:
 
 def pytest_sessionfinish(session, exitstatus):
     """The generic image name of the naming test is ours and only used by the tests: remove it once, in the controller (not in each xdist worker)."""
-    if not hasattr(session.config, "workerinput"):
+    if not hasattr(session.config, "workerinput") and shutil.which("docker"):
         subprocess.run(["docker", "rmi", "mocktoolchain:latest"], capture_output=True)

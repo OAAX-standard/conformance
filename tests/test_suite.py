@@ -1,5 +1,6 @@
 """The suite tests itself: the clean mock runtime passes everything, and every check fails on its own fault."""
 import pytest
+from conftest import HARNESS, lib_name, posix_only
 
 import json
 import re
@@ -104,6 +105,7 @@ def test_fault_is_caught(build_dir, monkeypatch, fault, variant, test_id):
     assert not [r for r in results.values() if r.outcome == "error"], "a check crashed instead of judging"
 
 
+@posix_only
 def test_version_node_is_not_an_extra_export(build_dir):
     assert _run(build_dir, "mock_versioned")["RT-S-02"].outcome == "pass"
 
@@ -118,8 +120,8 @@ def test_every_check_has_a_fault_case():
 
 
 def test_exit_codes(build_dir, monkeypatch, tmp_path):
-    lib = str(build_dir / "libmock_runtime.so")
-    base = ["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--hardware-safe", "--pause", "0",
+    lib = str(build_dir / lib_name("mock_runtime"))
+    base = ["runtime", lib, "--harness", str(build_dir / HARNESS), "--model", str(build_dir / "mock.model"), "--hardware-safe", "--pause", "0",
             "--init-config", "vendor_key=1"]
     assert cli.main(base) == 2  # --hardware-safe skips some MUSTs (RT-M-18..): INCOMPLETE, never a clean verdict
     assert cli.main(base + ["--only", "RT-S-01"]) == 0
@@ -177,8 +179,8 @@ def test_status_names_match_the_pinned_header():
 
 def test_report_document_and_html(build_dir, monkeypatch):
     monkeypatch.setenv("OAAX_MOCK_FAULT", "bad_version")
-    lib = str(build_dir / "libmock_runtime.so")
-    ctx = Context(lib, str(build_dir / "oaax-harness"), ["secret_key=hunter2"], settle_ms=500, timeout=30)
+    lib = str(build_dir / lib_name("mock_runtime"))
+    ctx = Context(lib, str(build_dir / HARNESS), ["secret_key=hunter2"], settle_ms=500, timeout=30)
     doc = report.build(run_suite(ctx), lib, "2.0", ["secret_key=hunter2"], [])
     text = json.dumps(doc)
     assert "hunter2" not in text and doc["options"]["init_config_keys"] == ["secret_key"]  # values are never stored
@@ -224,7 +226,7 @@ def test_docker_arguments_are_masked_and_their_values_are_secrets():
 
 
 def test_only_does_not_count_unselected_tests_as_drafts(build_dir):
-    ctx = Context(str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness"), ["vendor_key=1"], settle_ms=500, timeout=30)
+    ctx = Context(str(build_dir / lib_name("mock_runtime")), str(build_dir / HARNESS), ["vendor_key=1"], settle_ms=500, timeout=30)
     suite = run_suite(ctx, ["RT-S-01"])
     drafts = sum(spec.status != "approved" for spec in load().values())
     assert len(suite.results) == 1 and suite.not_approved == drafts  # unselected approved tests are not drafts

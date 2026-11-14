@@ -12,6 +12,14 @@ from pathlib import Path
 
 from .registry import Blocked, Fail
 
+WINDOWS = os.name == "nt"
+HARNESS_NAME = "oaax-harness.exe" if WINDOWS else "oaax-harness"
+LIB_HINT = "RuntimeLibrary.dll" if WINDOWS else "libRuntimeLibrary.so"  # how the runtime file is usually called on this OS
+# Windows reports a crash as an exception code (the exit code of the process), not as a signal
+NT_EXCEPTIONS = {0xC0000005: "ACCESS_VIOLATION", 0xC00000FD: "STACK_OVERFLOW", 0xC0000094: "INT_DIVIDE_BY_ZERO", 0xC000001D: "ILLEGAL_INSTRUCTION",
+                 0xC0000409: "STACK_BUFFER_OVERRUN (fast fail, e.g. abort())", 0xC0000374: "HEAP_CORRUPTION", 0xC0000142: "DLL_INIT_FAILED", 0xC0000135: "DLL_NOT_FOUND"}
+SIGHUP = getattr(signal, "SIGHUP", None)  # no SIGHUP on Windows
+
 EXIT_USAGE = 2
 # RuntimeStatus of the 2.0 header (tests/test_suite.py checks this table against spec/2.0/interface.h)
 STATUS_NAMES = ["SUCCESS", "ERROR", "NOT_INITIALIZED", "ALREADY_INITIALIZED", "MODEL_NOT_LOADED", "INVALID_ARGUMENT", "INVALID_MODEL",
@@ -36,12 +44,12 @@ def status_name(status) -> str:
     return f"unknown status {status}"
 
 
-CHECKOUT_HARNESS = Path(__file__).resolve().parents[2] / "build" / "oaax-harness"  # `scripts/build.sh` in a dev checkout
+CHECKOUT_HARNESS = Path(__file__).resolve().parents[2] / "build" / HARNESS_NAME  # `scripts/build.sh` in a dev checkout
 
 
 def packaged_harness() -> Path:
     """Where the wheel keeps the harness (the build hook puts it there; absent in a pure wheel or a checkout)."""
-    return Path(__file__).resolve().parent / "bin" / "oaax-harness"
+    return Path(__file__).resolve().parent / "bin" / HARNESS_NAME
 
 
 def find_harness(explicit: str | None = None) -> str:
@@ -50,16 +58,16 @@ def find_harness(explicit: str | None = None) -> str:
         if path:
             if not Path(path).is_file():
                 raise FileNotFoundError(f"{source} {path}: no such file")
-            if not os.access(path, os.X_OK):
+            if not WINDOWS and not os.access(path, os.X_OK):
                 raise FileNotFoundError(f"{source} {path}: not executable (chmod +x it)")
             return str(Path(path).resolve())
     for candidate in (packaged_harness(), CHECKOUT_HARNESS):
         if candidate.is_file():
-            if not os.access(candidate, os.X_OK):
+            if not WINDOWS and not os.access(candidate, os.X_OK):
                 raise FileNotFoundError(f"{candidate}: the harness is not executable (a broken install: reinstall, or chmod +x it)")
             return str(candidate)
-    raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: this install has none (a Linux wheel contains it; a macOS, Windows or source install "
-                            "does not). Use the Linux wheel, or build it (scripts/build.sh) and pass --harness PATH or set OAAX_HARNESS")
+    raise FileNotFoundError("oaax-harness (the C harness of the runtime tier) not found: this install has none (the Linux and Windows wheels contain it; a macOS or source install "
+                            "does not). Use a wheel, or build it (scripts/build.sh, scripts/build.ps1 on Windows) and pass --harness PATH or set OAAX_HARNESS")
 
 
 def _is_utf8(raw: bytes) -> bool:
@@ -90,6 +98,9 @@ class Run:
     def signal_name(self) -> str | None:
         if self.returncode >= 0:
             return None
+        if WINDOWS:  # run_scenario stores an NTSTATUS exit code (0xC0000005) as a negative number
+            code = self.returncode + 2**32
+            return NT_EXCEPTIONS.get(code, f"exception 0x{code:08X}")
         try:
             return signal.Signals(-self.returncode).name
         except ValueError:  # real-time signals (SIGRTMIN+n) are not in the enum
@@ -154,7 +165,9 @@ class Run:
         if end == "dlopen":
             text = self.dlopen_error()
             own = bool(self.lib) and text.startswith(f"{self.lib}:")  # "<the library>: cannot open shared object file: Permission denied": not a dependency
-            hint = "; its dependencies must be found (set LD_LIBRARY_PATH)" if "cannot open shared object file" in text and not own else ""  # advice only for a missing dependency
+            missing = "cannot open shared object file" in text or "Windows error 126" in text or "Windows error 1114" in text
+            where = "put them next to the library or on PATH" if WINDOWS else "set LD_LIBRARY_PATH"
+            hint = f"; its dependencies must be found ({where})" if missing and not own else ""  # advice only for a missing dependency
             return f"the library does not load: {text or '?'}{hint}"
         if end == "symbols":
             return "exports are missing (RT-S-01)"
@@ -251,7 +264,7 @@ def uninterruptible():
     if threading.current_thread() is not threading.main_thread():
         yield
         return
-    saved = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM, SIGHUP) if s is not None}
     try:
         yield
     finally:
@@ -265,20 +278,30 @@ def _stop(proc: subprocess.Popen) -> None:
         _stop_group(proc)
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Hard kill of the process and the helpers it started."""
+    if WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _stop_group(proc: subprocess.Popen) -> None:
-    for sig, wait in ((signal.SIGTERM, GRACE_SECONDS), (signal.SIGKILL, 5)):
+    if not WINDOWS:  # a polite SIGTERM first: lets the runtime release the device. Windows has no equivalent for a console process: it is killed.
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=GRACE_SECONDS)
         except ProcessLookupError:
             return
-        try:
-            proc.wait(timeout=wait)
-            break
         except subprocess.TimeoutExpired:
-            continue
+            pass
+    _kill_tree(proc)
     try:
-        os.killpg(proc.pid, signal.SIGKILL)  # helpers that outlived the harness
-    except ProcessLookupError:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
         pass
 
 
@@ -317,7 +340,9 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
         timed_out, started = False, time.monotonic()
         stdout, stderr = TailCapture(CAPTURE), TailCapture(CAPTURE)  # bounded: see TailCapture
         try:
-            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout.write_fd, stderr=stderr.write_fd, start_new_session=True)
+            # own session / process group: a Ctrl-C of the user's terminal must not reach the harness before the suite has stopped it properly
+            detach = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout.write_fd, stderr=stderr.write_fd, **detach)
         except BaseException:
             stdout.abandon(), stderr.abandon()
             raise
@@ -329,12 +354,9 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
         except BaseException:
             _stop(proc)
             raise
-        if not timed_out:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)  # leftovers of a runtime that daemonised
-            except ProcessLookupError:
-                pass
-        text = out.read_text(errors="replace") if out.exists() else ""
+        if not timed_out and not WINDOWS:
+            _kill_tree(proc)  # leftovers of a runtime that daemonised
+        text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
         lines = []
         for line in text.splitlines():
             try:
@@ -343,7 +365,8 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 pass  # a half-written last line of a killed process
         secrets = [pair.split("=", 1)[1] for pair in config if "=" in pair]
         tail = lambda capture: hide_secrets(capture.value().decode("utf-8", errors="replace"), secrets)[-TAIL:]  # noqa: E731 - scrub first, cut afterwards
-        return Run(scenario, proc.returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr), lib)
+        returncode = proc.returncode - 2**32 if WINDOWS and 0xC0000000 <= proc.returncode <= 0xCFFFFFFF else proc.returncode  # an NTSTATUS crash counts like a signal: negative
+        return Run(scenario, returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr), lib)
     finally:
         scratch.cleanup()
         if own_dir:

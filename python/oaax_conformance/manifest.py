@@ -9,7 +9,7 @@ import stat
 import sys
 from pathlib import Path
 
-SCHEMA = json.loads((Path(__file__).parent / "oaax-manifest.schema.json").read_text())
+SCHEMA = json.loads((Path(__file__).parent / "oaax-manifest.schema.json").read_text(encoding="utf-8"))
 FLOATS = {"FLOAT", "FLOAT16", "BFLOAT16", "DOUBLE"}
 UNIQUE_AXES = "NCHWDT"  # X (no meaning) may repeat
 
@@ -113,6 +113,6 @@ def validate(doc: dict, dir: str | None = None) -> list[str]:
 
 if __name__ == "__main__":
     path = Path(sys.argv[1])
-    found = validate(json.loads(path.read_text()), str(path.parent) if "--dir" in sys.argv else None)
+    found = validate(json.loads(path.read_text(encoding="utf-8")), str(path.parent) if "--dir" in sys.argv else None)
     print("\n".join(found) or "OK")
     sys.exit(1 if found else 0)

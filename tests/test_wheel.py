@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import HARNESS, lib_name, posix_only
 from oaax_conformance import harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,7 @@ def test_no_harness_anywhere_is_one_clear_line_and_exit_3(build_dir, tmp_path, m
     monkeypatch.setattr(harness, "packaged_harness", lambda: tmp_path / "absent")
     monkeypatch.setattr(harness, "CHECKOUT_HARNESS", tmp_path / "absent")
     monkeypatch.delenv("OAAX_HARNESS", raising=False)
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet"]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--quiet"]) == 3
     err = capsys.readouterr().err.strip()
     assert "\n" not in err and "oaax-harness" in err and "Traceback" not in err
 
@@ -63,12 +64,16 @@ def _build(tmp_path, path_dirs):
     return sorted(out.glob("*.whl")), sorted(out.glob("*.tar.gz"))
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("cmake"), reason="the harness needs Linux and cmake")
+@pytest.mark.skipif(not (sys.platform.startswith("linux") or sys.platform == "win32") or not shutil.which("cmake"), reason="the harness needs Linux or Windows, and cmake")
 def test_the_wheel_built_from_the_sdist_contains_an_executable_harness(tmp_path):
     wheels, sdists = _build(tmp_path, [str(Path(shutil.which("uv")).parent), *os.environ["PATH"].split(os.pathsep)])
     assert len(sdists) == 1 and len(wheels) == 1
-    assert wheels[0].name.endswith("-py3-none-linux_" + os.uname().machine + ".whl") or "manylinux" in wheels[0].name  # platform tag, never py3-none-any
+    assert "py3-none-any" not in wheels[0].name  # a platform tag, never a pure wheel
     with zipfile.ZipFile(wheels[0]) as z:
+        if sys.platform == "win32":
+            assert wheels[0].name.endswith(("win_amd64.whl", "win_arm64.whl")) and z.getinfo("oaax_conformance/bin/oaax-harness.exe")
+            return
+        assert wheels[0].name.endswith("-py3-none-linux_" + os.uname().machine + ".whl") or "manylinux" in wheels[0].name
         info = z.getinfo("oaax_conformance/bin/oaax-harness")
         assert stat.S_IMODE(info.external_attr >> 16) & 0o111, "the executable bit is lost"
 
@@ -95,10 +100,11 @@ def test_model_at_tiny_conv_is_the_packaged_model(build_dir, monkeypatch):
 
     seen = []
     monkeypatch.setattr(cli, "_runtime", lambda args: seen.append(args.model) or 0)
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--model", "@tiny-conv"]) == 0
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--model", "@tiny-conv"]) == 0
     assert seen == [toolchain.default_model()] and Path(seen[0]).is_file()
 
 
+@posix_only
 def test_a_harness_that_is_not_executable_is_one_clear_line_not_an_internal_error(tmp_path, monkeypatch):
     """F2: a packaged binary without the x bit, or --harness FILE that is not executable, ended in "internal error PermissionError" (exit 4)."""
     import pytest

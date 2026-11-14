@@ -2,7 +2,9 @@
 import re
 import shutil
 import subprocess
+import sys
 
+from ..libcheck import pe_exports
 from ..registry import Blocked, Fail, check
 
 NOT_INITIALIZED = 2
@@ -25,8 +27,20 @@ def exports(ctx):
         raise Fail("missing exports: " + ", ".join(missing))
 
 
+def _only_the_nine_exports_pe(ctx):
+    """The export table of the DLL: nothing but the nine functions (no vendor symbol, no C++ API)."""
+    names = pe_exports(ctx.lib)
+    if isinstance(names, str):
+        raise Blocked(f"the DLL's exports cannot be listed: {names}")
+    extra = sorted(set(names) - {"runtime_" + s for s in SYMBOLS})
+    if extra:
+        raise Fail(f"{len(extra)} extra exported symbol(s), e.g. {', '.join(extra[:5])}")
+
+
 @check("RT-S-02")
 def only_the_nine_exports(ctx):
+    if sys.platform == "win32":
+        return _only_the_nine_exports_pe(ctx)
     nm, readelf = shutil.which("nm"), shutil.which("readelf")
     if not nm or not readelf:
         raise Blocked("nm/readelf not found")

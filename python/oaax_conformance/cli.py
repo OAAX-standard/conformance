@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__, html_report, report
 from .dockerargs import foreground_problem, unparseable, uses
-from .harness import find_harness
+from .harness import LIB_HINT, SIGHUP, find_harness
 from .libcheck import library_problem
 from .modelio import NoModelIO, check_inputs, parse_arg
 from .specdocs import load
@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog="oaax-conformance", description="OAAX conformance suite")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
-    rt = sub.add_parser("runtime", help="check a runtime library (.so)")
+    rt = sub.add_parser("runtime", help="check a runtime library (.so, or .dll on Windows)")
     rt.add_argument("library")
     _add_common(rt)
     rt.add_argument("--model", metavar="FILE", help="a model file this runtime can load: enables the tests that need one (@tiny-conv: the small model the suite ships)")
@@ -94,6 +94,8 @@ def _check_ids(ids: list[str] | None, prefixes: tuple, what: str) -> str | None:
 
 
 def _validate(args) -> str | None:
+    if args.command == "toolchain" and sys.platform == "win32":
+        return "the toolchain tier tests Linux containers (Docker): run it on Linux or in WSL2. The runtime tier works on Windows"
     prefixes = ("RT-",) if args.command == "runtime" else ("TC-", "E2E-")
     for ids, what in ((args.only, "--only"), (args.skip, "--skip")):
         if (problem := _check_ids(ids, prefixes, what)):
@@ -138,7 +140,7 @@ def _validate(args) -> str | None:
             return f"--runtime {args.runtime} {why}"
         if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
             return f"--model-file {args.model_file}: must be a path inside the output directory"
-        if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
+        if args.command == "toolchain" and ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
             return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
         # One reader (dockerargs) for this and for the masking of secrets: every spelling docker accepts (-u0, -tu, -v/x:/y, --user=0, --user 0).
         # A refusal is printed to the terminal and may be pasted into a ticket: an argument that carries an environment value is shown masked (`-dteTOKEN=***`), and a
@@ -185,7 +187,7 @@ def _not_a_library(ctx) -> str | None:
     text = run.dlopen_error() if run.end == "dlopen" else ""
     # dlerror names ANOTHER file when a dependency is missing; when it starts with the library's own name, the file itself is the problem
     if any(pattern in text for pattern in NOT_A_LIBRARY) or text.startswith(f"{ctx.lib}:"):
-        return f"{ctx.lib} is not a loadable runtime library ({text.replace(f"{ctx.lib}: ", "")}): pass the libRuntimeLibrary.so built for this machine"
+        return f"{ctx.lib} is not a loadable runtime library ({text.replace(f"{ctx.lib}: ", "")}): pass the {LIB_HINT} built for this machine"
     return None
 
 
@@ -265,6 +267,9 @@ def _terminate(signum, frame):
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a Windows console (cp437/cp1252) must never crash the report on a character it cannot show
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     if getattr(args, "model", None) == "@tiny-conv":  # the packaged model, wherever the package is installed
         from .toolchain import default_model
@@ -278,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
               f"(values under {report.MIN_SECRET} characters are not masked)", file=sys.stderr)
     main_thread = threading.current_thread() is threading.main_thread()
     # `nohup oaax-conformance ...` ignores SIGHUP on purpose: keep it ignored
-    caught = [signal.SIGTERM] + ([] if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else [signal.SIGHUP])
+    caught = [signal.SIGTERM] + ([] if SIGHUP is None or signal.getsignal(SIGHUP) is signal.SIG_IGN else [SIGHUP])
     previous = {s: signal.signal(s, _terminate) for s in caught} if main_thread else {}
     try:
         return _runtime(args) if args.command == "runtime" else _toolchain(args)

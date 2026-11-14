@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-11-14
+
+- **Runtime tier on Windows** (`RuntimeLibrary.dll`, x64 or arm64): the harness and the mock runtime build with MSVC, the whole self-test suite passes on `windows-latest`, and the reference CPU runtime gives the same verdicts as on Linux. Windows-only details: crashes are named by exception code, RT-S-02 reads the PE export table, `--hardware-safe` and the other options are unchanged. The toolchain tier stays Linux-only (exit 3 on Windows). A `win_amd64` wheel (the harness built with MSVC) is released next to the Linux ones, so `uv tool install 'oaax-conformance[e2e]'` works on Windows too; from a checkout use `scripts/build.ps1`.
+- Reports and the console no longer depend on the machine's text encoding (UTF-8 files; a console that cannot show a character shows `?`).
+- The docker `TMPDIR` check applies to the toolchain command only.
+- Releases: a merge to `main` that bumps the version (dated CHANGELOG section, untagged version) creates the draft GitHub Release by itself, with the wheels (Linux x86_64 and aarch64, Windows x64), SHA256SUMS and these notes. Publishing it still needs a maintainer, then the `pypi` reviewer.
+
 ## 0.1.1 - 2026-10-30
 
 - The PyPI project page has its own, shorter readme (`README.pypi.md`): what the suite checks, install, usage, exit codes, links. The GitHub README is unchanged. No change to the checks or the harness.

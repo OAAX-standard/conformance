@@ -68,7 +68,7 @@ int scenario_cycles(void) {
   do_init("init", opt.config, 1);  // a runtime that cannot start at all is "blocked", not a re-init failure
   do_cleanup("cleanup_first");
   int baseline = thread_count(), init_failures = 0, cleanup_failures = 0, completed = 0;
-  long rss_first = -1;
+  long long rss_first = -1;
   char first_failure[128] = "";
   for (int i = 0; i < opt.cycles && !out_of_time(0); i++) {
     begin("cycle");
@@ -83,8 +83,8 @@ int scenario_cycles(void) {
   settle(baseline, opt.settle_ms);
   char extra[420];
   snprintf(extra, sizeof extra,
-           "\"cycles\":%d,\"completed\":%d,\"init_failures\":%d,\"cleanup_failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,"
-           "\"rss_last\":%ld,\"threads_before\":%d,\"threads_after\":%d",
+           "\"cycles\":%d,\"completed\":%d,\"init_failures\":%d,\"cleanup_failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%lld,"
+           "\"rss_last\":%lld,\"threads_before\":%d,\"threads_after\":%d",
            opt.cycles, completed, init_failures, cleanup_failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
   done("cycles", NO_STATUS, NULL, extra);
   return 0;
@@ -92,20 +92,14 @@ int scenario_cycles(void) {
 
 // init, cleanup, dlclose: is the library really gone from the process?
 int scenario_unload(void) {
-  char *resolved = realpath(opt.lib, NULL);
   do_init("init", opt.config, 1);
   do_cleanup("cleanup");
   begin("dlclose");
-  int rc = dlclose(lib_handle);
-  int mapped = 0;
-  char line[PATH_MAX + 256];
-  FILE *maps = fopen("/proc/self/maps", "r");
-  while (maps && resolved && fgets(line, sizeof line, maps)) mapped |= strstr(line, resolved) != NULL;
-  if (maps) fclose(maps);
+  int rc = plat_dlclose(lib_handle);
+  int mapped = plat_is_mapped(opt.lib);
   char extra[64];
   snprintf(extra, sizeof extra, "\"dlclose_rc\":%d,\"mapped\":%s", rc, mapped ? "true" : "false");
   done("dlclose", NO_STATUS, NULL, extra);
-  free(resolved);
   return 0;
 }
 
@@ -131,12 +125,11 @@ int scenario_errors(void) {
   begin("load_missing_file");
   done("load_missing_file", rt.load_models(1, &missing), NULL, NULL);
 
-  char corrupt_path[] = "/tmp/oaax-corrupt-XXXXXX";
-  int fd = mkstemp(corrupt_path);
-  if (fd >= 0) {
+  char corrupt_path[PATH_MAX] = "";
+  if (plat_temp_file(corrupt_path, sizeof corrupt_path, "oaax-corrupt") == 0) {
     const char junk[] = "this is not a model: oaax conformance suite garbage bytes";
-    if (write(fd, junk, sizeof junk) < 0) perror("write");
-    close(fd);
+    FILE *f = fopen(corrupt_path, "wb");
+    if (f) fwrite(junk, 1, sizeof junk, f), fclose(f);
   }
   ModelConfig corrupt = {.file_path = corrupt_path};
   begin("load_corrupt_file");

@@ -1,7 +1,11 @@
 name: build
-# Builds one wheel per architecture (the C harness inside, compiled in a manylinux container), checks each in a clean container without a compiler and keeps them as a workflow artifact.
-# A tag vX.Y.Z (a commit of main) also creates a DRAFT GitHub Release with the wheels, one SHA256SUMS and the CHANGELOG notes: a maintainer reviews and publishes it.
-# Publishing the release starts publish.yml, which uploads those same wheels to PyPI.
+# Builds one wheel per Linux architecture (the C harness inside, compiled in a manylinux container, checked in a clean container without a compiler) and one for
+# Windows x64 (built with MSVC, checked by installing it as a tool and running the reference Windows runtime), and keeps them as a workflow artifact.
+# A DRAFT GitHub Release (wheels, one SHA256SUMS, the CHANGELOG notes) is created when
+#   - a tag vX.Y.Z is pushed (a commit of main), or
+#   - a commit lands on main whose package version is not tagged yet and has a DATED CHANGELOG section (merge the version bump = a new release; any other merge to main releases nothing).
+# A maintainer reviews and publishes the draft (GitHub then creates the tag at that commit). Publishing starts publish.yml, which uploads those same wheels to PyPI
+# after the reviewer of the `pypi` environment approves: PyPI versions can never be reused, so nothing is published without a human.
 on:
   push:
     branches: [main]
@@ -52,9 +56,45 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+  wheel-windows:
+    # Windows ARM has no reference runtime to smoke-test and no wheel yet: x64 only
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Build the wheel with MSVC (the harness is compiled by the build hook; a pure wheel is an error)
+        shell: bash
+        run: |
+          export OAAX_REQUIRE_HARNESS=1 SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          uv build --wheel --out-dir dist
+          ls dist
+          case "$(ls dist/*.whl)" in *win_amd64.whl) ;; *) echo "the wheel is not a win_amd64 platform wheel"; exit 1 ;; esac
+      - name: The long description renders
+        shell: bash
+        run: uvx twine check dist/*.whl
+      - name: Smoke test (the whole runtime tier on the published reference Windows CPU runtime)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory rt | Out-Null
+          curl.exe -sSfL -o rt/library.tar.gz "https://nbg1.your-objectstorage.com/oaax/runtimes/2.0.0/CPU/x86_64/Windows/library.tar.gz"
+          tar -xzf rt/library.tar.gz -C rt
+          $wheel = (Get-ChildItem dist/*.whl).FullName
+          ./scripts/smoke.ps1 $wheel (Resolve-Path rt/RuntimeLibrary.dll).Path
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          overwrite: true  # a re-run of the same commit
+          name: oaax-conformance-wheel-windows-x64-${{ github.sha }}
+          path: dist/*.whl
+          retention-days: 30
+          if-no-files-found: error
+
   build:
-    needs: wheel
+    needs: [wheel, wheel-windows]
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.decide.outputs.release_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,10 +107,10 @@ jobs:
           pattern: oaax-conformance-wheel-*-${{ github.sha }}
           merge-multiple: true
           path: dist
-      - name: One SHA256SUMS over all wheels (both architectures)
+      - name: One SHA256SUMS over all wheels
         shell: bash
         run: |
-          test "$(ls dist/*.whl | wc -l)" = 2 || { echo "expected one wheel per architecture"; ls dist; exit 1; }
+          test "$(ls dist/*.whl | wc -l)" = 3 || { echo "expected 3 wheels: Linux x86_64, Linux aarch64, Windows x64"; ls dist; exit 1; }
           (cd dist && sha256sum *.whl > SHA256SUMS && cat SHA256SUMS)
       - name: The tag must be on main and match the package version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -87,6 +127,20 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then final="--final"; fi
           uv run --no-project python scripts/release_notes.py "$version" dist/SHA256SUMS $final > dist/release-notes.md
           test -s dist/release-notes.md
+      - name: Decide whether this run creates a release (a tag, or a commit of main with a new, dated version)
+        id: decide
+        shell: bash
+        run: |
+          version=$(uv run --no-project python -c "import re,pathlib;print(re.search(r'__version__ = .(.+?).$', pathlib.Path('python/oaax_conformance/__init__.py').read_text(), re.M)[1])")
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "${GITHUB_EVENT_NAME}" != push ] || [ "${GITHUB_REF}" != refs/heads/main ]; then exit 0; fi   # pull requests build and test only
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null 2>&1; then
+            echo "::notice::v$version is already tagged: this merge releases nothing (bump the version in __init__.py and date its CHANGELOG section to release)"; exit 0
+          fi
+          if ! uv run --no-project python scripts/release_notes.py "$version" dist/SHA256SUMS --final > dist/release-notes.md; then
+            echo "::notice::version $version has no dated CHANGELOG section: nothing released"; exit 0
+          fi
+          echo "release_tag=v$version" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           overwrite: true  # a re-run of the same commit
@@ -96,7 +150,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.build.outputs.release_tag != ''
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -110,10 +164,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.release_tag }}
         run: |
-          # `gh release view TAG` does not find drafts; the list does. A re-run must not create a second release.
-          if gh release list --repo "$GITHUB_REPOSITORY" --json tagName --jq '.[].tagName' | grep -qx "$GITHUB_REF_NAME"; then
-            echo "a release for $GITHUB_REF_NAME already exists: delete the draft first, or tag a new version"; exit 1
+          # `gh release view TAG` does not find drafts; the list does. A re-run, or the tag that publishing the draft creates, must not make a second release:
+          # the draft of the main-branch run stays the one that was reviewed.
+          if gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
+            echo "::notice::a release for $TAG already exists: nothing to do (delete the draft to recreate it)"; exit 0
           fi
-          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/SHA256SUMS --draft --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+          # --target: on a main-branch run the tag does not exist yet; GitHub creates it at THIS commit when the draft is published
+          gh release create "$TAG" dist/*.whl dist/SHA256SUMS --draft --repo "$GITHUB_REPOSITORY" --title "$TAG" --target "$GITHUB_SHA" \
             --notes-file dist/release-notes.md

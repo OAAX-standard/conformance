@@ -72,7 +72,7 @@ static int parse(int argc, char **argv) {
 int main(int argc, char **argv) {
   int rc = parse(argc, argv);
   if (rc) return rc;
-  out = fopen(opt.out, "w");
+  out = fopen(opt.out, "wb");
   if (!out) {
     perror(opt.out);
     return EXIT_USAGE;

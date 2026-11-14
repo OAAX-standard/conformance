@@ -2,11 +2,13 @@
 import json
 import re
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 
 import helpers
 import pytest
+from conftest import HARNESS, lib_name, posix_only
 from oaax_conformance import cli, report
 from oaax_conformance.harness import Run, run_scenario
 
@@ -20,7 +22,7 @@ def _run(build_dir, fault, only, monkeypatch, init_config=("vendor_key=1",), **o
 
 
 def _scenario(build_dir, scenario, extra=(), config=("vendor_key=1",), timeout=60):
-    lib, harness = str(build_dir / "libmock_runtime.so"), str(build_dir / "oaax-harness")
+    lib, harness = str(build_dir / lib_name("mock_runtime")), str(build_dir / HARNESS)
     return run_scenario(harness, scenario, lib, list(config), timeout, ["-m", str(build_dir / "mock.model"), *extra])
 
 
@@ -42,7 +44,7 @@ def test_a_flood_of_big_requests_is_capped_by_bytes(build_dir, monkeypatch):
 
 def test_skip_and_hardware_safe_leave_tests_out(build_dir, tmp_path):
     out = tmp_path / "out"
-    base = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"),
+    base = ["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--model", str(build_dir / "mock.model"),
             "--init-config", "vendor_key=1", "--quiet", "--pause", "0", "--only", "RT-M-33", "--only", "RT-M-08", "--only", "RT-L-11", "--out", str(out)]
     assert cli.main(base + ["--skip", "RT-M-08"]) == 2  # B5: a skipped MUST is never a clean verdict
     outcomes = {r["id"]: r["outcome"] for r in json.loads((out / "report.json").read_text())["results"]}
@@ -132,6 +134,7 @@ def test_a_crash_in_a_static_destructor_is_not_blamed_on_a_rejected_input(build_
 # ---- A7: a runtime that forks -----------------------------------------------------------------------------------
 
 
+@posix_only
 def test_a_runtime_that_forks_a_helper_does_not_hang_the_suite(build_dir, monkeypatch):
     import uuid
 
@@ -150,6 +153,7 @@ def test_a_status_outside_the_header_is_shown_not_a_crash(build_dir, monkeypatch
     assert result.outcome == "warn" and "unknown status 99" in result.message
 
 
+@posix_only
 def test_thread_names_are_bytes(build_dir, monkeypatch):
     results = _run(build_dir, "bad_thread_name", ["RT-L-01", "RT-L-08"], monkeypatch)
     assert results["RT-L-01"].outcome == "pass" and results["RT-L-08"].outcome == "warn" and "bad" in results["RT-L-08"].message
@@ -186,7 +190,7 @@ def test_a_runtime_that_holds_one_model_still_gets_the_concurrency_tests(build_d
 def test_secrets_and_control_characters_never_reach_a_report(build_dir, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OAAX_MOCK_FAULT", "echo_config")
     out = tmp_path / "out"
-    cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=SECRET123",
+    cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--init-config", "vendor_key=SECRET123",
               "--only", "RT-L-13", "--only", "RT-L-05", "--quiet", "--out", str(out)])
     assert "SECRET123" not in capsys.readouterr().out
     for name in ("report.json", "report.html", "junit.xml"):
@@ -196,7 +200,7 @@ def test_secrets_and_control_characters_never_reach_a_report(build_dir, tmp_path
 def test_control_characters_do_not_break_the_xml_report(build_dir, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OAAX_MOCK_FAULT", "ctrl_err")
     out = tmp_path / "out"
-    cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1",
+    cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--init-config", "vendor_key=1",
               "--only", "RT-L-05", "--only", "RT-S-09", "--quiet", "--out", str(out)])
     ET.parse(out / "junit.xml")  # well-formed
     assert "\x1b" not in capsys.readouterr().out
@@ -220,13 +224,13 @@ def test_control_characters_do_not_break_the_xml_report(build_dir, tmp_path, mon
     ["runtime", "{lib}", "--workdir", "/nonexistent"],
     ["runtime", "{lib}", "--timeout", "1"],
     ["runtime", "{lib}", "--bogus"],
-    ["toolchain", "x", "--docker-arg=--user=0"],
-    ["toolchain", "x", "--docker-arg=--network=host"],
+    pytest.param(["toolchain", "x", "--docker-arg=--user=0"], marks=posix_only),
+    pytest.param(["toolchain", "x", "--docker-arg=--network=host"], marks=posix_only),
 ])
 def test_a_bad_command_line_exits_with_3_before_running_anything(build_dir, tmp_path, argv, capsys):
-    argv = [a.replace("{lib}", str(build_dir / "libmock_runtime.so")) for a in argv]
+    argv = [a.replace("{lib}", str(build_dir / lib_name("mock_runtime"))) for a in argv]
     if argv[0] == "runtime" and "--harness" not in argv:
-        argv += ["--harness", str(build_dir / "oaax-harness")]
+        argv += ["--harness", str(build_dir / HARNESS)]
     with pytest.raises(SystemExit) as stop:
         code = cli.main(argv)
         raise SystemExit(code)
@@ -238,9 +242,10 @@ def test_a_bad_command_line_exits_with_3_before_running_anything(build_dir, tmp_
 def test_out_that_is_a_file_is_refused(build_dir, tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("x")
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--out", str(blocker)]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--out", str(blocker)]) == 3
 
 
+@posix_only
 def test_a_library_that_is_not_elf_does_not_pass_the_export_check(tmp_path, build_dir):
     fake = tmp_path / "libfake.so"
     fake.write_text("not a library")
@@ -318,26 +323,28 @@ def test_the_clean_mock_passes_at_the_default_sizes(build_dir):
 # ---- adversary round 2 (B1..) -----------------------------------------------------------------------------
 
 
+@posix_only
 def test_b1_a_real_time_signal_is_named_not_a_traceback(build_dir, monkeypatch):
     assert Run("x", -40, False).signal_name == "signal 40" and Run("x", -11, False).signal_name == "SIGSEGV" and Run("x", 3, False).signal_name is None
     assert "40" in Run("x", -40, False).how_it_ended()
     monkeypatch.setattr(cli, "_runtime", lambda args: 1 / 0)  # any other bug of the suite: exit 4, never 1
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet"]) == 4
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--quiet"]) == 4
 
 
 def test_b3_a_crash_inside_cleanup_fails_the_cleanup_check(build_dir, monkeypatch):
     """B3: the first init/cleanup cycle is a throw-away one; a crash in it was only BLOCKED, so the run ended INCOMPLETE instead of FAILED."""
     results = _run(build_dir, "crash_in_cleanup", ["RT-L-17"], monkeypatch)
-    assert results["RT-L-17"].outcome == "fail" and "SIGSEGV" in results["RT-L-17"].message
+    assert results["RT-L-17"].outcome == "fail" and ("ACCESS_VIOLATION" if sys.platform == "win32" else "SIGSEGV") in results["RT-L-17"].message
 
 
 def test_b5_hardware_safe_skipping_a_must_is_incomplete(build_dir):
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"),
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--model", str(build_dir / "mock.model"),
                      "--init-config", "vendor_key=1", "--quiet", "--pause", "0", "--hardware-safe", "--only", "RT-M-18"]) == 2
 
 
+@posix_only
 def test_b6_an_unwritable_out_is_refused_before_the_run(build_dir, capsys):
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet", "--out", "/proc/nope/out"]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--quiet", "--out", "/proc/nope/out"]) == 3
     assert "--out" in capsys.readouterr().err
 
 
@@ -376,7 +383,7 @@ def test_c2_the_html_report_is_written_when_a_check_crashed(build_dir, tmp_path,
 
     monkeypatch.setitem(registry.CHECKS, "RT-S-03", crash)
     out = tmp_path / "out"
-    code = cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1",
+    code = cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--init-config", "vendor_key=1",
                      "--only", "RT-S-03", "--quiet", "--out", str(out)])
     assert code == 4 and {p.name for p in out.iterdir()} == {"report.html", "report.json", "junit.xml"}
 
@@ -394,7 +401,7 @@ def test_h1_what_a_runtime_prints_is_captured_bounded(build_dir, monkeypatch):
     cap.child_started()
     child.wait()
     tail = cap.value()
-    assert len(tail) <= 100 and tail.endswith(b"199999\n")
+    assert len(tail) <= 100 and tail.rstrip().endswith(b"199999")  # Windows ends lines with \r\n
     import stat
 
     from oaax_conformance import harness
@@ -420,7 +427,7 @@ def test_the_console_hides_secrets_too(build_dir, tmp_path, monkeypatch, capsys)
     bad = tmp_path / "bad.model"
     bad.write_text("garbage")
     monkeypatch.setenv("OAAX_MOCK_FAULT", "echo_config")
-    cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--init-config", "vendor_key=SECRET123",
+    cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--init-config", "vendor_key=SECRET123",
               "--model", str(bad), "--input", "x:FLOAT:1,4", "--input", "scale:FLOAT:1", "--only", "RT-M-08", "--quiet"])
     console = capsys.readouterr().out
     assert "config=***" in console and "SECRET123" not in console
@@ -490,7 +497,7 @@ def test_a_run_that_selected_no_test_is_not_a_clean_pass(build_dir, monkeypatch,
     from types import SimpleNamespace
 
     monkeypatch.setattr(cli, "run_suite", lambda *a, **k: SimpleNamespace(results=[], not_approved=[], leftovers=[]))
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--quiet"]) == 3
     assert "no test ran" in capsys.readouterr().err
 
 
@@ -506,12 +513,13 @@ def test_only_with_a_draft_test_id_exits_3_not_0(build_dir, tmp_path, monkeypatc
     row = next(l for l in text.splitlines() if l.startswith("| RT-S-01 |"))
     (specs / "runtime-static-lifecycle.md").write_text(text.replace(row, row.rsplit("approved", 1)[0] + "draft |"))
     monkeypatch.setattr(specdocs, "spec_dir", lambda: specs)
-    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", "--only", "RT-S-01"]
+    argv = ["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--quiet", "--only", "RT-S-01"]
     assert cli.main(argv) == 3
     assert "no test ran" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("sig,code", [("SIGTERM", 143), ("SIGHUP", 129)])  # D4: a closed terminal is the same hole as a CI timeout
+@posix_only
 def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeypatch, sig, code):
     """D1: a CI timeout (SIGTERM) used to kill only the suite and leave the harness, and the device it holds, running."""
     import shutil
@@ -520,10 +528,10 @@ def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeyp
     import uuid
 
     lib = tmp_path / f"libmock-{uuid.uuid4().hex}.so"  # a unique path to find our own harness by
-    shutil.copy(build_dir / "libmock_runtime.so", lib)
+    shutil.copy(build_dir / lib_name("mock_runtime"), lib)
     monkeypatch.setenv("OAAX_MOCK_FAULT", "hang_init")
     pgrep = lambda: subprocess.run(["pgrep", "-f", str(lib)], capture_output=True, text=True).stdout.split()  # noqa: E731
-    suite = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "runtime", str(lib), "--harness", str(build_dir / "oaax-harness"),
+    suite = subprocess.Popen([sys.executable, "-m", "oaax_conformance.cli", "runtime", str(lib), "--harness", str(build_dir / HARNESS),
                               "--init-config", "vendor_key=1", "--only", "RT-L-01", "--quiet", "--timeout", "60"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     deadline = time.monotonic() + 20
     while len(pgrep()) < 2 and time.monotonic() < deadline:  # the suite itself and its harness both carry the path
@@ -538,6 +546,7 @@ def test_d1_a_signal_to_the_suite_stops_the_harness(build_dir, tmp_path, monkeyp
     assert b"Traceback" not in suite.stderr.read()
 
 
+@posix_only
 def test_a_hangup_that_nohup_ignored_stays_ignored(build_dir, monkeypatch):
     import signal
 
@@ -545,7 +554,7 @@ def test_a_hangup_that_nohup_ignored_stays_ignored(build_dir, monkeypatch):
     monkeypatch.setattr(cli, "_runtime", lambda args: seen.update(hup=signal.getsignal(signal.SIGHUP), term=signal.getsignal(signal.SIGTERM)) or 0)
     old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
     try:
-        assert cli.main(["runtime", str(build_dir / "libmock_runtime.so")]) == 0
+        assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime"))]) == 0
         assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN  # restored as it was
     finally:
         signal.signal(signal.SIGHUP, old)
@@ -553,9 +562,9 @@ def test_a_hangup_that_nohup_ignored_stays_ignored(build_dir, monkeypatch):
 
 
 def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_dir, capsys, tmp_path):
-    lib = str(build_dir / "libmock_runtime.so")
+    lib = str(build_dir / lib_name("mock_runtime"))
     for extra, expect in ((["--input", "x:FLOAT:1,4", "--input", "x:FLOAT:1,4"], "listed twice"), (["--input", "x:FLOAT:100000,100000"], "GiB")):
-        assert cli.main(["runtime", lib, "--harness", str(build_dir / "oaax-harness"), "--quiet", *extra]) == 3
+        assert cli.main(["runtime", lib, "--harness", str(build_dir / HARNESS), "--quiet", *extra]) == 3
         assert expect in capsys.readouterr().err
     # the same two mistakes inside a manifest block the model checks instead of failing them
     ctx = helpers.context(build_dir)
@@ -567,7 +576,7 @@ def test_d5_a_duplicated_or_absurd_input_is_a_usage_error_not_a_verdict(build_di
 @pytest.mark.parametrize("option", ["--pause", "--round-trip-timeout"])
 @pytest.mark.parametrize("value", ["nan", "inf", "-1"])
 def test_pause_and_round_trip_timeout_must_be_finite_seconds(build_dir, option, value, capsys):
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--quiet", option, value]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--quiet", option, value]) == 3
     assert option in capsys.readouterr().err
 
 
@@ -606,6 +615,7 @@ def test_a_variable_docker_takes_from_this_environment_is_a_secret_too(args, mon
     assert report.secret_values([], args) == []  # an unset variable has no value to leak
 
 
+@posix_only
 def test_an_env_file_is_refused_because_its_values_cannot_be_kept_out_of_the_reports(capsys):
     assert cli.main(["toolchain", "x", "--docker-arg=--env-file=/etc/hostname"]) == 3
     assert "-e NAME=VALUE" in capsys.readouterr().err
@@ -665,7 +675,7 @@ def test_no_message_or_doc_tells_the_user_to_pip_install():
 
     root = Path(__file__).resolve().parent.parent
     files = [*(root / "python").rglob("*.py"), root / "README.md", root / "CONTRIBUTING.md", root / "docs" / "design.md"]
-    assert [str(f.relative_to(root)) for f in files if "pip install" in f.read_text()] == []
+    assert [str(f.relative_to(root)) for f in files if "pip install" in f.read_text(encoding="utf-8")] == []
 
 
 def test_the_readme_gives_the_python_the_wheel_needs():
@@ -711,7 +721,7 @@ def test_a_note_is_printed_on_the_console_and_kept_in_junit(tmp_path):
 
 def _cli_run(build_dir, tmp_path, *extra):
     out = tmp_path / "out"
-    argv = ["runtime", str(build_dir / "libmock_runtime.so"), "--harness", str(build_dir / "oaax-harness"), "--model", str(build_dir / "mock.model"), "--quiet", "--pause", "0",
+    argv = ["runtime", str(build_dir / lib_name("mock_runtime")), "--harness", str(build_dir / HARNESS), "--model", str(build_dir / "mock.model"), "--quiet", "--pause", "0",
             "--out", str(out), *extra]
     return cli.main(argv), out
 
@@ -742,6 +752,7 @@ def test_a_full_run_does_not_claim_to_be_partial(build_dir, tmp_path, capsys):
     assert "approved checks were selected" not in report.console(list(results.values()), 0, selected=(len(results), len(results)))
 
 
+@posix_only
 def test_a_tmpdir_docker_cannot_mount_is_refused_naming_the_cause(tmp_path, monkeypatch, capsys):
     """A9e: with ':' in TMPDIR every `docker run -v` failed and the message blamed the Docker setup and --docker-arg."""
     import tempfile
@@ -755,6 +766,7 @@ def test_a_tmpdir_docker_cannot_mount_is_refused_naming_the_cause(tmp_path, monk
 
 # ---- round 5, A14: the documented sandbox is what the code does ---------------------------------------------------------------------------------
 
+@posix_only
 def test_every_conversion_runs_with_dropped_capabilities_and_the_docker_arg_comes_last():
     """A14: only five conversions were restricted; every other one had the default capabilities. --docker-arg stays last so docker lets it override."""
     from types import SimpleNamespace
@@ -783,6 +795,7 @@ def test_no_doc_claims_a_sandbox_without_saying_where_it_applies():
 
 @pytest.mark.parametrize("kind,cause", [("empty", "is empty"), ("text", "not an ELF file"), ("executable", "cannot dynamically load|not a dynamic executable"),
                                         ("elf32", "32-bit library")])  # round 6: read from the ELF header up front (libcheck), before dlopen is asked
+@posix_only
 def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path, capsys, kind, cause):
     """A16: a 0-byte file, a text file or an executable as the "runtime" gave 60+ BLOCKED rows, exit 2 and a wrong "set LD_LIBRARY_PATH" hint."""
     import shutil
@@ -795,10 +808,10 @@ def test_a_file_that_is_not_a_library_is_refused_in_one_line(build_dir, tmp_path
     elif kind == "executable":
         shutil.copy(shutil.which("true"), path)
     else:
-        data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+        data = bytearray((build_dir / lib_name("mock_runtime")).read_bytes())
         data[4] = 1  # ELFCLASS32
         path.write_bytes(bytes(data))
-    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness"), "--quiet"]) == 3
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / HARNESS), "--quiet"]) == 3
     err = capsys.readouterr().err.strip()
     assert re.search(cause, err) and "LD_LIBRARY_PATH" not in err and len(err.splitlines()) == 1 and "BLOCKED" not in err
 
@@ -825,12 +838,14 @@ def test_docker_short_option_clusters_cannot_carry_an_unmasked_environment_value
 @pytest.mark.parametrize("args", [["-u0"], ["-uroot"], ["-u", "0"], ["-tu", "0"], ["-Ptu0"], ["-u=0"], ["--user=0"], ["--user", "0"],
                                   ["-v/host:/x"], ["-v", "/host:/x"], ["-tv", "/host:/x"], ["--volume=/host:/x"], ["--mount", "type=bind,src=/h,dst=/x"],
                                   ["--net=host"], ["--network", "host"], ["--entrypoint=sh"], ["--read-only"], ["--privileged"], ["--rm"], ["--name=x"]])
+@posix_only
 def test_every_spelling_of_a_flag_the_suite_sets_itself_is_refused(args, capsys):
     """C9: only `--user` and `-u` as whole words were refused; `-u0` ran the toolchain as root after the suite's own --user, so TC-02 passed falsely."""
     assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
     assert "the suite sets this itself" in capsys.readouterr().err
 
 
+@posix_only
 def test_a_cluster_that_cannot_be_read_with_certainty_is_refused(capsys):
     assert cli.main(["toolchain", "x", "--docker-arg=-xe", "--docker-arg=K=v"]) == 3
     assert "cannot tell which docker options" in capsys.readouterr().err
@@ -849,7 +864,7 @@ def _crafted(build_dir, tmp_path, how):
     import platform
 
     path = tmp_path / "libcrafted.so"
-    data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+    data = bytearray((build_dir / lib_name("mock_runtime")).read_bytes())
     host_is_arm = platform.machine().lower() in ("aarch64", "arm64")
     if how == "other_machine":
         data[18:20] = (62 if host_is_arm else 183).to_bytes(2, "little")  # x86_64 on an ARM host, aarch64 on an x86_64 host
@@ -866,34 +881,38 @@ def _crafted(build_dir, tmp_path, how):
 
 
 @pytest.mark.parametrize("how,expect", [("other_machine", "is built for"), ("elf32", "32-bit"), ("truncated", "truncated"), ("empty", "is empty"), ("text", "not an ELF")])
+@posix_only
 def test_a_library_that_cannot_load_here_is_one_line_with_exit_3(build_dir, tmp_path, capsys, how, expect):
     """C5: an aarch64 library on x86_64 gave 60 BLOCKED rows, exit 2 and the advice to set LD_LIBRARY_PATH; a truncated one even passed RT-S-02."""
     path = _crafted(build_dir, tmp_path, how)
-    assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    assert cli.main(["runtime", str(path), "--harness", str(build_dir / HARNESS)]) == 3
     err = capsys.readouterr().err
     assert expect in err and "LD_LIBRARY_PATH" not in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
 
 
+@posix_only
 def test_a_directory_and_an_unreadable_library_are_one_line_too(build_dir, tmp_path, capsys):
     import os
 
-    assert cli.main(["runtime", str(tmp_path), "--harness", str(build_dir / "oaax-harness")]) == 3
+    assert cli.main(["runtime", str(tmp_path), "--harness", str(build_dir / HARNESS)]) == 3
     assert "is a directory" in capsys.readouterr().err  # said by the pre-validation (is_file), before any header is read
     if os.geteuid() != 0:  # root reads everything
         path = tmp_path / "libnoperm.so"
-        path.write_bytes((build_dir / "libmock_runtime.so").read_bytes())
+        path.write_bytes((build_dir / lib_name("mock_runtime")).read_bytes())
         path.chmod(0)
-        assert cli.main(["runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+        assert cli.main(["runtime", str(path), "--harness", str(build_dir / HARNESS)]) == 3
         err = capsys.readouterr().err
         assert "permission denied" in err and "LD_LIBRARY_PATH" not in err
 
 
+@posix_only
 def test_the_same_check_guards_the_runtime_given_to_the_toolchain_tests(build_dir, tmp_path, capsys):
     path = _crafted(build_dir, tmp_path, "text")
     assert cli.main(["toolchain", "x", "--runtime", str(path)]) == 3
     assert "not an ELF" in capsys.readouterr().err
 
 
+@posix_only
 def test_the_library_path_advice_is_for_a_missing_dependency_only():
     own = Run("static", 1, False, [{"step": "dlopen", "status": 1, "str": "/x/libr.so: cannot open shared object file: Permission denied".encode().hex()}], lib="/x/libr.so")
     own.lines[0]["status"] = 1
@@ -903,6 +922,7 @@ def test_the_library_path_advice_is_for_a_missing_dependency_only():
     assert "LD_LIBRARY_PATH" not in own._why_missing("x") and "LD_LIBRARY_PATH" in other._why_missing("x")
 
 
+@posix_only
 def test_rt_s_02_is_blocked_not_passed_when_nm_cannot_read_the_library(tmp_path):
     import types
 
@@ -978,6 +998,7 @@ def test_the_changelog_counts_the_review_rounds_that_were_run():
 
 @pytest.mark.parametrize("args", [["-d"], ["--detach"], ["--detach=true"], ["-dit"], ["-td"], ["-a", "stdout"], ["--attach=stdout"], ["-astdout"], ["--restart=always"], ["--restart", "no"],
                                   ["--cidfile=/tmp/x"], ["--cidfile", "/tmp/x"], ["-i", "-t"], ["-it"], ["-ti"], ["--interactive", "--tty"], ["-i", "--tty"], ["-dit"], ["-itu0"]])
+@posix_only
 def test_a_flag_that_changes_the_foreground_run_is_refused(args, capsys):
     """D6: `-d` gave TC-20/TC-33 false FAILs (docker returns the container id at once), `-i -t` a false TC-01 FAIL (docker exit 1 blamed on the toolchain)."""
     assert cli.main(["toolchain", "x", *[f"--docker-arg={a}" for a in args]]) == 3
@@ -1004,6 +1025,7 @@ def test_the_docs_list_what_is_refused():
 
 # ---- round 7 (D7): the masking floor is documented and announced; a refusal never echoes a secret --------------------------------------------
 
+@posix_only
 def test_values_under_three_characters_are_named_in_a_note_and_not_masked(capsys):
     """D7: `--init-config pin=42` is not masked (a 1-2 character value would shred every message); that was silent."""
     assert report.short_secret_names(["pin=42", "license=SECRET123", "x=", "k=v"], ["-e", "A=1", "-e", "B=long-enough", "-eC=zz"]) == ["pin", "k", "A", "C"]
@@ -1035,21 +1057,22 @@ def test_the_docs_state_the_masking_floor():
 
 # ---- round 7 (D8): the toolchain tier's --runtime gets the same one-line check as `runtime LIB` --------------------------------------------------
 
+@posix_only
 def test_an_executable_given_as_the_toolchain_runtime_is_one_line(build_dir, tmp_path, capsys):
     """D8: `toolchain IMG --runtime LIB` went on to run every conversion and then BLOCKED the end-to-end tests; an ET_EXEC or PIE executable is refused up front."""
     import shutil
 
     et_exec = tmp_path / "libexec.so"
-    data = bytearray((build_dir / "libmock_runtime.so").read_bytes())
+    data = bytearray((build_dir / lib_name("mock_runtime")).read_bytes())
     data[16:18] = (2).to_bytes(2, "little")  # ET_EXEC
     et_exec.write_bytes(bytes(data))
     pie = tmp_path / "libpie.so"
     shutil.copy(shutil.which("true"), pie)
     for path, expect in ((et_exec, "is an executable, not a shared library"), (pie, "cannot dynamically load")):
-        assert cli.main(["toolchain", "x", "--runtime", str(path), "--harness", str(build_dir / "oaax-harness")]) == 3
+        assert cli.main(["toolchain", "x", "--runtime", str(path), "--harness", str(build_dir / HARNESS)]) == 3
         err = capsys.readouterr().err
         assert expect in err and len([l for l in err.splitlines() if l.strip()]) == 1, err
-    assert cli.main(["runtime", str(et_exec), "--harness", str(build_dir / "oaax-harness")]) == 3  # and `runtime LIB` agrees
+    assert cli.main(["runtime", str(et_exec), "--harness", str(build_dir / HARNESS)]) == 3  # and `runtime LIB` agrees
     assert "is an executable" in capsys.readouterr().err
 
 

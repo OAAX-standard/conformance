@@ -1,4 +1,5 @@
 """Shared by the self-tests: build a runtime Context with small load sizes (the mock needs 5 ms per request)."""
+from conftest import HARNESS, lib_name
 from oaax_conformance.suite import Context, run_suite
 
 
@@ -6,7 +7,7 @@ def context(build_dir, variant="mock_runtime", init_config=("vendor_key=1",), mo
     values = dict(settle_ms=500, timeout=60, cycles=12, flood=100, requests=60, producers=3, per_producer=10, model_cycles=10, lost_after_ms=400,
                   retrieve_timeout_ms=1500, warmup_ms=3000)
     values.update(overrides)
-    return Context(str(build_dir / f"lib{variant}.so"), str(build_dir / "oaax-harness"), list(init_config), str(build_dir / "mock.model") if model else None, **values)
+    return Context(str(build_dir / lib_name(variant)), str(build_dir / HARNESS), list(init_config), str(build_dir / "mock.model") if model else None, **values)
 
 
 def run(ctx, only=None, skip=None):

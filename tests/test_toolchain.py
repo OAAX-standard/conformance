@@ -2,13 +2,17 @@
 Needs Docker (the mock toolchain is an image); skipped without it."""
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
+from conftest import HARNESS, lib_name
 
 from oaax_conformance.registry import CHECKS
 from oaax_conformance.suite import run_suite
 from oaax_conformance.toolchain import ToolchainContext, default_model
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the toolchain tier tests Linux containers: it runs on Linux")
 
 CLEAN = "oaax-mock-toolchain:1.0"
 
@@ -63,7 +67,7 @@ def _context(build_dir, mock_io_onnx, image, fault, tmp_path, with_runtime=True)
         shared.chmod(0o777)
         docker_args += ["-v", f"{shared}:/lock"]
     return ToolchainContext(image, mock_io_onnx if with_runtime else default_model(), docker_args, timeout=120,
-                            runtime_lib=str(build_dir / "libmock_runtime.so") if with_runtime else None, harness=str(build_dir / "oaax-harness"),
+                            runtime_lib=str(build_dir / lib_name("mock_runtime")) if with_runtime else None, harness=str(build_dir / HARNESS),
                             init_config=["vendor_key=1"], runtime_timeout=60, warmup_ms=3000)
 
 
@@ -510,8 +514,8 @@ def test_a_huge_model_never_makes_the_suite_read_it_into_memory(build_dir, mock_
 
     code = ("import resource, sys\nfrom oaax_conformance import cli\nrc = cli.main(sys.argv[1:])\n"
             "print('MAXRSS_MB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024)\nsys.exit(rc)")
-    argv = ["toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=huge_model", "--runtime", str(build_dir / "libmock_runtime.so"), "--harness",
-            str(build_dir / "oaax-harness"), "--init-config", "vendor_key=1", "--only", "E2E-01", "--only", "E2E-04", "--quiet"]
+    argv = ["toolchain", CLEAN, "--docker-arg=-e", "--docker-arg=OAAX_MOCK_FAULT=huge_model", "--runtime", str(build_dir / lib_name("mock_runtime")), "--harness",
+            str(build_dir / HARNESS), "--init-config", "vendor_key=1", "--only", "E2E-01", "--only", "E2E-04", "--quiet"]
     done = subprocess.run([sys.executable, "-c", code, *argv], capture_output=True, text=True, timeout=600)
     peak = int(done.stdout.rsplit("MAXRSS_MB", 1)[1])
     assert "E2E-04" in done.stdout and "ERROR" not in done.stdout.split("Details")[-1].split("Result")[0], done.stdout[-1500:]

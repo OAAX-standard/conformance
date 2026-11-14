@@ -218,7 +218,7 @@ def build_toolchain(suite, image: str, info: dict, spec_version: str, docker_arg
 
 
 def write_json(path: str, doc: dict) -> None:
-    Path(path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    Path(path).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def write_junit(path: str, doc: dict) -> None:
