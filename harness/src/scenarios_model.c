@@ -48,7 +48,8 @@ int parse_input(const char *arg, struct InputSpec *spec) {
 static size_t element_count(const int *shape, int rank) {
   size_t n = 1;
   for (int i = 0; i < rank; i++)
-    if (shape[i] < 0 || __builtin_mul_overflow(n, (size_t)shape[i], &n)) return 0;  // a runtime's shape may be anything: 0 = not countable
+    if (shape[i] < 0 || (shape[i] != 0 && n > SIZE_MAX / (size_t)shape[i])) return 0;  // a runtime's shape may be anything: 0 = not countable
+    else n *= (size_t)shape[i];
   return n;
 }
 

@@ -19,7 +19,11 @@
 #include <io.h>
 #define access _access
 #define R_OK 4
+#ifdef _MSC_VER
+#define EXPORT  // exported by the linker (CMakeLists.txt: /EXPORT): MSVC refuses dllexport after the header's prototypes
+#else
 #define EXPORT __declspec(dllexport)
+#endif
 typedef CRITICAL_SECTION mutex_t;
 typedef CONDITION_VARIABLE cond_t;
 #define LOCK(m) EnterCriticalSection(&(m))
