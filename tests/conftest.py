@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = sys.platform == "win32"
 EXE = ".exe" if WINDOWS else ""
 HARNESS = f"oaax-harness{EXE}"
+posix_only = pytest.mark.skipif(WINDOWS, reason="needs POSIX: fork, ELF files, signals, fifos, symlinks, chmod, or the toolchain tier (Linux containers)")
 
 
 def lib_name(variant: str) -> str:
@@ -39,7 +42,16 @@ def _write_atomically(path: Path, data: bytes) -> None:
         return
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_bytes(data)
-    os.replace(tmp, path)
+    for attempt in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows: the target is open in another worker. Same bytes everywhere, so once it holds them we are done
+            if path.exists() and path.read_bytes() == data:
+                tmp.unlink(missing_ok=True)
+                return
+            time.sleep(0.1)
+    raise PermissionError(path)
 
 
 IMAGES = {  # image reference -> Dockerfile target
@@ -95,5 +107,5 @@ def mock_io_onnx(tmp_path_factory) -> str:
 
 def pytest_sessionfinish(session, exitstatus):
     """The generic image name of the naming test is ours and only used by the tests: remove it once, in the controller (not in each xdist worker)."""
-    if not hasattr(session.config, "workerinput"):
+    if not hasattr(session.config, "workerinput") and shutil.which("docker"):
         subprocess.run(["docker", "rmi", "mocktoolchain:latest"], capture_output=True)

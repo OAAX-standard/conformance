@@ -32,7 +32,7 @@ def sort_key(test_id: str) -> tuple:
 def load(directory: Path | None = None) -> dict[str, Spec]:
     specs = {}
     for path in sorted((directory or spec_dir()).glob("*.md")):
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if not line.startswith("| ") or not cells[0].startswith(("RT-", "TC-", "E2E-")):
                 continue

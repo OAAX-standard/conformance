@@ -94,6 +94,8 @@ def _check_ids(ids: list[str] | None, prefixes: tuple, what: str) -> str | None:
 
 
 def _validate(args) -> str | None:
+    if args.command == "toolchain" and sys.platform == "win32":
+        return "the toolchain tier tests Linux containers (Docker): run it on Linux or in WSL2. The runtime tier works on Windows"
     prefixes = ("RT-",) if args.command == "runtime" else ("TC-", "E2E-")
     for ids, what in ((args.only, "--only"), (args.skip, "--skip")):
         if (problem := _check_ids(ids, prefixes, what)):
@@ -138,7 +140,7 @@ def _validate(args) -> str | None:
             return f"--runtime {args.runtime} {why}"
         if args.model_file and (Path(args.model_file).is_absolute() or ".." in Path(args.model_file).parts):
             return f"--model-file {args.model_file}: must be a path inside the output directory"
-        if ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
+        if args.command == "toolchain" and ":" in tempfile.gettempdir():  # every `docker run -v <workspace>:/input` would read the colon as a separator
             return f"TMPDIR {tempfile.gettempdir()} contains ':' which docker cannot mount: set TMPDIR to another directory"
         # One reader (dockerargs) for this and for the masking of secrets: every spelling docker accepts (-u0, -tu, -v/x:/y, --user=0, --user 0).
         # A refusal is printed to the terminal and may be pasted into a ticket: an argument that carries an environment value is shown masked (`-dteTOKEN=***`), and a
@@ -265,6 +267,9 @@ def _terminate(signum, frame):
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a Windows console (cp437/cp1252) must never crash the report on a character it cannot show
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     if getattr(args, "model", None) == "@tiny-conv":  # the packaged model, wherever the package is installed
         from .toolchain import default_model

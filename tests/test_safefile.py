@@ -3,6 +3,7 @@ import os
 import signal
 
 import pytest
+from conftest import posix_only
 
 from oaax_conformance import modelio, safefile
 
@@ -30,12 +31,14 @@ def test_a_regular_file_is_read(tmp_path):
     assert safefile.read_json(tmp_path / "f.json") == {"a": 1}
 
 
+@posix_only
 def test_a_named_pipe_is_refused_without_blocking(tmp_path, must_not_hang):
     os.mkfifo(tmp_path / "oaax-manifest.json")
     with pytest.raises(safefile.Unreadable, match="not a regular file"):
         safefile.read_limited(tmp_path / "oaax-manifest.json")
 
 
+@posix_only
 def test_a_link_is_never_followed(tmp_path, must_not_hang):
     secret = tmp_path / "secret"
     secret.write_text("{}")
@@ -54,6 +57,7 @@ def test_a_file_over_the_limit_is_not_read(tmp_path):
 
 
 @pytest.mark.parametrize("make", ["fifo", "link_to_zero", "sparse"])
+@posix_only
 def test_the_manifest_next_to_a_model_never_hangs_or_exhausts_memory(tmp_path, must_not_hang, make):
     """C8: modelio read the manifest with Path.read_text(): a pipe blocked every scenario, /dev/zero or a sparse 3 GB file read without bound."""
     model = tmp_path / "model.bin"
@@ -99,6 +103,7 @@ def huge_model(tmp_path):
     return path
 
 
+@posix_only
 def test_a_toolchain_written_model_over_2_gib_is_never_read_into_memory(huge_model):
     """D3: onnx.load read the whole file (8.4 GB of peak memory for a sparse 8 GiB `model.onnx`): a file larger than RAM would kill the testing host."""
     out, peak = _peak_memory_mb_of("""
@@ -112,6 +117,7 @@ except modelio.NoModelIO as e:
     assert peak < 1000, f"peak memory {peak} MB"
 
 
+@posix_only
 def test_the_converted_models_io_is_not_read_from_a_huge_file_either(huge_model):
     out, peak = _peak_memory_mb_of("""
 from oaax_conformance.checks.toolchain import _io_views

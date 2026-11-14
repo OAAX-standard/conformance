@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from conftest import HARNESS, lib_name
+from conftest import HARNESS, lib_name, posix_only
 from oaax_conformance import harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +100,7 @@ def test_model_at_tiny_conv_is_the_packaged_model(build_dir, monkeypatch):
     assert seen == [toolchain.default_model()] and Path(seen[0]).is_file()
 
 
+@posix_only
 def test_a_harness_that_is_not_executable_is_one_clear_line_not_an_internal_error(tmp_path, monkeypatch):
     """F2: a packaged binary without the x bit, or --harness FILE that is not executable, ended in "internal error PermissionError" (exit 4)."""
     import pytest

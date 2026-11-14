@@ -1,6 +1,6 @@
 """The suite tests itself: the clean mock runtime passes everything, and every check fails on its own fault."""
 import pytest
-from conftest import HARNESS, lib_name
+from conftest import HARNESS, lib_name, posix_only
 
 import json
 import re
@@ -105,6 +105,7 @@ def test_fault_is_caught(build_dir, monkeypatch, fault, variant, test_id):
     assert not [r for r in results.values() if r.outcome == "error"], "a check crashed instead of judging"
 
 
+@posix_only
 def test_version_node_is_not_an_extra_export(build_dir):
     assert _run(build_dir, "mock_versioned")["RT-S-02"].outcome == "pass"
 

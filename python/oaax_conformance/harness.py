@@ -356,7 +356,7 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
             raise
         if not timed_out and not WINDOWS:
             _kill_tree(proc)  # leftovers of a runtime that daemonised
-        text = out.read_text(errors="replace") if out.exists() else ""
+        text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
         lines = []
         for line in text.splitlines():
             try:

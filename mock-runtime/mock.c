@@ -14,6 +14,12 @@
 
 // The few operating-system calls the mock needs: a mutex, a condition variable, a clock, sleeping, a thread. Faults that exist only on
 // POSIX (fork, a thread name that is not UTF-8) are compiled out on Windows; the checks that need them skip there.
+#ifdef _MSC_VER
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL __thread
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
@@ -495,7 +501,7 @@ EXPORT const char *runtime_get_name(void) {
 
 #ifndef MOCK_OMIT_INFO
 EXPORT const char *runtime_get_info(void) {
-  static __thread char info[128];
+  static THREAD_LOCAL char info[128];
   if (initialized) {
     if (fault("info_not_json")) return "not json";
     LOCK(lock);
