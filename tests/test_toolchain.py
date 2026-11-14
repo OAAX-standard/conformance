@@ -2,6 +2,7 @@
 Needs Docker (the mock toolchain is an image); skipped without it."""
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -10,6 +11,8 @@ from conftest import HARNESS, lib_name
 from oaax_conformance.registry import CHECKS
 from oaax_conformance.suite import run_suite
 from oaax_conformance.toolchain import ToolchainContext, default_model
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the toolchain tier tests Linux containers: it runs on Linux")
 
 CLEAN = "oaax-mock-toolchain:1.0"
 
