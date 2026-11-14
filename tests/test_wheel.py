@@ -64,12 +64,16 @@ def _build(tmp_path, path_dirs):
     return sorted(out.glob("*.whl")), sorted(out.glob("*.tar.gz"))
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("cmake"), reason="the harness needs Linux and cmake")
+@pytest.mark.skipif(not (sys.platform.startswith("linux") or sys.platform == "win32") or not shutil.which("cmake"), reason="the harness needs Linux or Windows, and cmake")
 def test_the_wheel_built_from_the_sdist_contains_an_executable_harness(tmp_path):
     wheels, sdists = _build(tmp_path, [str(Path(shutil.which("uv")).parent), *os.environ["PATH"].split(os.pathsep)])
     assert len(sdists) == 1 and len(wheels) == 1
-    assert wheels[0].name.endswith("-py3-none-linux_" + os.uname().machine + ".whl") or "manylinux" in wheels[0].name  # platform tag, never py3-none-any
+    assert "py3-none-any" not in wheels[0].name  # a platform tag, never a pure wheel
     with zipfile.ZipFile(wheels[0]) as z:
+        if sys.platform == "win32":
+            assert wheels[0].name.endswith(("win_amd64.whl", "win_arm64.whl")) and z.getinfo("oaax_conformance/bin/oaax-harness.exe")
+            return
+        assert wheels[0].name.endswith("-py3-none-linux_" + os.uname().machine + ".whl") or "manylinux" in wheels[0].name
         info = z.getinfo("oaax_conformance/bin/oaax-harness")
         assert stat.S_IMODE(info.external_attr >> 16) & 0o111, "the executable bit is lost"
 

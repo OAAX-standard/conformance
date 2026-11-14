@@ -3,11 +3,13 @@
 Checks whether an OAAX **runtime** (shared library) and/or **toolchain** (Docker image) conforms to the
 [OAAX specification](https://oaax-standard.github.io/OAAX/Specification/).
 
-> **Status: 0.1, Linux only.** Every test is specified in [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
+> **Status: 0.1. The runtime tier runs on Linux and Windows; the toolchain tier on Linux.** Every test is specified in [docs/tests/](https://github.com/OAAX-standard/conformance/blob/main/docs/tests/): its level, the quoted spec clause, and what the C++ CPU runtime and toolchain do today.
 
 ## Quick start
 
 Needs [uv](https://docs.astral.sh/uv/) on Linux (x86_64 or aarch64); Docker for toolchains. No compiler: the wheel contains the C harness.
+**Windows (x64 or arm64, runtime tier only):** a runtime is a `RuntimeLibrary.dll`; there is no Windows wheel yet, so use a checkout with Visual Studio (or any compiler CMake finds):
+`uv sync`, `./scripts/build.ps1`, then `uv run oaax-conformance runtime C:\path\RuntimeLibrary.dll --model @tiny-conv`. Dependencies of the DLL must sit next to it or on `PATH` (the suite does not add folders to the search path, so a late-loading dependency fails here as it would in the host).
 
 ```bash
 uv tool install --python 3.12 'oaax-conformance[e2e]'   # all tiers; or run once: uvx --python 3.12 --from 'oaax-conformance[e2e]' oaax-conformance ...

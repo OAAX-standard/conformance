@@ -10,7 +10,7 @@ A pass means: *this runtime or toolchain can be swapped for another one without 
 
 ## Install
 
-Needs [uv](https://docs.astral.sh/uv/) on Linux, and Docker to test toolchains. The wheel needs Python 3.12 or newer; uv fetches it if your default is older.
+Needs [uv](https://docs.astral.sh/uv/) on Linux (the runtime tier also runs on Windows from a checkout, see the GitHub readme), and Docker to test toolchains. The wheel needs Python 3.12 or newer; uv fetches it if your default is older.
 
 ```bash
 uv tool install --python 3.12 'oaax-conformance[e2e]'
