@@ -365,7 +365,7 @@ def run_scenario(harness: str, scenario: str, lib: str, config: list[str], timeo
                 pass  # a half-written last line of a killed process
         secrets = [pair.split("=", 1)[1] for pair in config if "=" in pair]
         tail = lambda capture: hide_secrets(capture.value().decode("utf-8", errors="replace"), secrets)[-TAIL:]  # noqa: E731 - scrub first, cut afterwards
-        returncode = proc.returncode - 2**32 if WINDOWS and proc.returncode >= 0xC0000000 else proc.returncode  # an NTSTATUS crash counts like a signal: negative
+        returncode = proc.returncode - 2**32 if WINDOWS and 0xC0000000 <= proc.returncode <= 0xCFFFFFFF else proc.returncode  # an NTSTATUS crash counts like a signal: negative
         return Run(scenario, returncode, timed_out, lines, round((time.monotonic() - started) * 1000), timeout, tail(stdout), tail(stderr), lib)
     finally:
         scratch.cleanup()

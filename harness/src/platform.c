@@ -29,6 +29,8 @@ void *plat_dlopen(const char *path) {
   char msg[512] = "";
   FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, msg, sizeof msg, NULL);
   msg[strcspn(msg, "\r\n")] = 0;
+  char *insert = strstr(msg, "%1");  // error 193: "%1 is not a valid Win32 application": the insert is the file, already named in front
+  if (insert) memmove(insert, insert + 2, strlen(insert + 2) + 1), memmove(insert, insert + (insert[0] == ' '), strlen(insert) + 1);
   // 126 (module not found) and 1114 (a DLL init routine failed) are usually a DEPENDENCY: the message must not start with the file's own name
   int own = code != 126 && code != 1114;
   snprintf(dl_error, sizeof dl_error, "%s%s%s (Windows error %lu)", own ? path : "", own ? ": " : "", msg, (unsigned long)code);
@@ -55,8 +57,10 @@ static DWORD WINAPI thread_main(LPVOID p) {
 
 int plat_thread_start(plat_thread *t, plat_thread_fn fn, void *arg) {
   ThreadStart *s = malloc(sizeof *s);
+  if (!s) return 1;
   s->fn = fn, s->arg = arg;
   *t = CreateThread(NULL, 0, thread_main, s, 0, NULL);
+  if (!*t) free(s);
   return *t ? 0 : 1;
 }
 

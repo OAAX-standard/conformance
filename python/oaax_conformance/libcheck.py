@@ -64,7 +64,7 @@ def _read_pe(path: str):
     try:
         size = p.stat().st_size
         with p.open("rb") as f:
-            head = f.read(4096)
+            head = f.read(65536)
     except PermissionError:
         return "cannot be read (permission denied): fix its permissions"
     except OSError as e:
@@ -122,11 +122,13 @@ def pe_exports(path: str) -> list[str] | str:
 
     try:
         at = offset(export_rva)
+        number_of_functions = struct.unpack("<I", data[at + 20:at + 24])[0]
         number_of_names, names_rva = struct.unpack("<II", data[at + 24:at + 32])[0], struct.unpack("<I", data[at + 32:at + 36])[0]
         names = []
         for i in range(number_of_names):
             name_at = offset(struct.unpack("<I", data[offset(names_rva) + 4 * i:offset(names_rva) + 4 * i + 4])[0])
             names.append(data[name_at:data.index(b"\0", name_at)].decode("ascii", errors="replace"))
+        names += [f"#ordinal-only export {i + 1}" for i in range(max(0, number_of_functions - number_of_names))]  # NONAME exports have no name but still count
         return names
     except (ValueError, struct.error):
         return "its export table is damaged"

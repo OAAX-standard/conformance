@@ -37,19 +37,17 @@ def build_dir() -> Path:
 
 def _write_atomically(path: Path, data: bytes) -> None:
     """Every xdist worker runs this fixture while the others already run tests that read these files: a plain write_bytes truncates the file first and a
-    reader sees it empty or half written (this made a CI run find the model 'blocked'). Write a temporary file, then rename it over the target."""
-    if path.exists() and path.read_bytes() == data:
-        return
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_bytes(data)
-    for attempt in range(50):
+    reader sees it empty or half written (this made a CI run find the model 'blocked'). Write a temporary file, then rename it over the target.
+    Windows refuses to replace or read a file another worker has open (PermissionError): the bytes are the same everywhere, so retry until the file holds them."""
+    for _ in range(100):
         try:
+            if path.exists() and path.read_bytes() == data:
+                return
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(data)
             os.replace(tmp, path)
             return
-        except PermissionError:  # Windows: the target is open in another worker. Same bytes everywhere, so once it holds them we are done
-            if path.exists() and path.read_bytes() == data:
-                tmp.unlink(missing_ok=True)
-                return
+        except PermissionError:
             time.sleep(0.1)
     raise PermissionError(path)
 

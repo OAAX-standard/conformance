@@ -560,7 +560,7 @@ int scenario_concurrency(void) {
   begin("run");
   for (int p = 0; p < producers; p++) {
     args[p] = (struct Producer){.index = p, .count = per_producer, .num_models = models};
-    plat_thread_start(&threads[p], produce, &args[p]);
+    if (plat_thread_start(&threads[p], produce, &args[p])) fprintf(stderr, "cannot start a thread\n"), exit(EXIT_USAGE);
   }
   int received = 0, duplicates = 0, wrong_model = 0, mismatch = 0, unknown_id = 0, stalled = 0;
   double t0 = now_ms();
@@ -631,7 +631,7 @@ int scenario_cleanup_wakeup(void) {
   start();
   int status = -1;
   plat_thread t;
-  plat_thread_start(&t, block_in_retrieve, &status);
+  if (plat_thread_start(&t, block_in_retrieve, &status)) fprintf(stderr, "cannot start a thread\n"), exit(EXIT_USAGE);
   sleep_ms(300);
   do_cleanup("cleanup");
   int woke = plat_thread_join_timeout(t, 5000);

@@ -71,3 +71,20 @@ def test_a_missing_dependency_gets_the_windows_advice(monkeypatch):
     own = Run("static", 3, False, [{"step": "dlopen", "status": None, "str": b"C:\\x\\RuntimeLibrary.dll: %1 is not a valid Win32 application. (Windows error 193)".hex()}, {"end": "dlopen"}],
               lib="C:\\x\\RuntimeLibrary.dll")
     assert "PATH" not in own._why_missing("symbols")
+
+
+@pytest.mark.skipif(not WINDOWS, reason="the mock DLLs are only built on Windows")
+def test_exports_without_a_name_still_count_as_exports(build_dir, tmp_path):
+    """A .def file entry `f @5 NONAME` has no name in the export table: only NumberOfFunctions > NumberOfNames shows it (code-review finding)."""
+    data = bytearray((build_dir / lib_name("mock_runtime")).read_bytes())
+    pe_at = struct.unpack("<I", data[0x3C:0x40])[0]
+    opt, sections, opt_size = pe_at + 24, struct.unpack("<H", data[pe_at + 6:pe_at + 8])[0], struct.unpack("<H", data[pe_at + 20:pe_at + 22])[0]
+    rva = struct.unpack("<I", data[opt + 112:opt + 116])[0]
+    for i in range(sections):
+        vsize, base, raw_size, raw_ptr = struct.unpack("<IIII", data[opt + opt_size + 40 * i + 8:opt + opt_size + 40 * i + 24])
+        if base <= rva < base + max(vsize, raw_size):
+            at = raw_ptr + rva - base
+    data[at + 20:at + 24] = struct.pack("<I", 11)  # 11 functions, 9 names
+    patched = tmp_path / "RuntimeLibrary.dll"
+    patched.write_bytes(data)
+    assert len(libcheck.pe_exports(str(patched))) == 11

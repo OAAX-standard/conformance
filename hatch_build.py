@@ -47,7 +47,7 @@ class HarnessHook(BuildHookInterface):
         flags = "" if windows else f"-ffile-prefix-map={ROOT}=."
         run = lambda *cmd: subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: E731
         try:
-            run("cmake", "-S", str(ROOT), "-B", str(out), "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_C_FLAGS={flags}")
+            run("cmake", "-S", str(ROOT), "-B", str(out), "-DCMAKE_BUILD_TYPE=Release", *([f"-DCMAKE_C_FLAGS={flags}"] if flags else []))  # an empty value would replace the MSVC defaults
             run("cmake", "--build", str(out), "--config", "Release", "--target", "oaax-harness", "--parallel")
         except subprocess.CalledProcessError as e:
             raise OSError(f"cmake failed: {(e.stderr or e.stdout or '').strip()[-300:]}") from e
