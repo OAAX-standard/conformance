@@ -1,8 +1,9 @@
-"""Build hook: compile the C harness and ship it inside the wheel (oaax_conformance/bin/oaax-harness).
+"""Build hook: compile the C harness and ship it inside the wheel (oaax_conformance/bin/oaax-harness, oaax-harness.exe on Windows).
 
 - OAAX_WHEEL_PLAT (e.g. manylinux_2_28_x86_64) is the platform tag of the wheel. The release builds in a manylinux container, where that tag is honest.
   Without it the tag is this machine's (linux_x86_64): fine to install here, not to publish.
-- No cmake / compiler / Linux: a pure wheel without the harness (the CLI says so when the runtime tier needs it), unless OAAX_REQUIRE_HARNESS=1 (the release).
+- Windows builds with whatever CMake finds (Visual Studio in the release): the wheel is tagged win_amd64 / win_arm64.
+- No cmake / compiler / Linux or Windows: a pure wheel without the harness (the CLI says so when the runtime tier needs it), unless OAAX_REQUIRE_HARNESS=1 (the release).
 """
 import os
 import shutil
@@ -34,21 +35,23 @@ class HarnessHook(BuildHookInterface):
             return
         build_data["pure_python"] = False
         build_data["tag"] = "py3-none-" + (os.environ.get("OAAX_WHEEL_PLAT") or sysconfig.get_platform().replace("-", "_").replace(".", "_"))
-        build_data["force_include"][str(binary)] = "oaax_conformance/bin/oaax-harness"
+        build_data["force_include"][str(binary)] = f"oaax_conformance/bin/{binary.name}"
 
     def _compile(self) -> Path:
-        if not sys.platform.startswith("linux") or not shutil.which("cmake"):  # the harness uses dlfcn and /proc
-            raise OSError("needs Linux and cmake")
+        windows = sys.platform == "win32"
+        if not (sys.platform.startswith("linux") or windows) or not shutil.which("cmake"):  # the harness uses dlfcn + /proc, or the Win32 API
+            raise OSError("needs Linux or Windows, and cmake")
         out = Path(tempfile.mkdtemp(prefix="oaax-harness-"))  # hatch reads the file after this hook returns: removed in finalize()
         self._workdir = out
-        # -ffile-prefix-map: the same bytes whatever directory the build ran in
-        flags = f"-ffile-prefix-map={ROOT}=."
+        # -ffile-prefix-map: the same bytes whatever directory the build ran in (Linux release; the Windows build is not byte-reproducible)
+        flags = "" if windows else f"-ffile-prefix-map={ROOT}=."
         run = lambda *cmd: subprocess.run(cmd, check=True, capture_output=True, text=True)  # noqa: E731
         try:
             run("cmake", "-S", str(ROOT), "-B", str(out), "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_C_FLAGS={flags}")
-            run("cmake", "--build", str(out), "--target", "oaax-harness", "-j")
+            run("cmake", "--build", str(out), "--config", "Release", "--target", "oaax-harness", "--parallel")
         except subprocess.CalledProcessError as e:
             raise OSError(f"cmake failed: {(e.stderr or e.stdout or '').strip()[-300:]}") from e
-        binary = out / "oaax-harness"
-        subprocess.run(["strip", str(binary)], check=False)  # smaller; harmless when strip is missing
+        binary = out / ("oaax-harness.exe" if windows else "oaax-harness")
+        if not windows:
+            subprocess.run(["strip", str(binary)], check=False)  # smaller; harmless when strip is missing
         return binary

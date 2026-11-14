@@ -1,15 +1,13 @@
 // Shared by the harness sources: the runtime under test, the options, and the observation helpers.
 #pragma once
-#include <dirent.h>
-#include <dlfcn.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "interface.h"
+#include "platform.h"
 
 enum { EXIT_DLOPEN = 3, EXIT_SYMBOLS = 4, EXIT_INIT = 5, EXIT_MODEL = 6, EXIT_USAGE = 2 };
 #define NO_STATUS INT_MIN
@@ -61,13 +59,9 @@ extern void *lib_handle;
 void put_hex(const char *s);
 void put_hex_bytes(const char *s, size_t n);
 void end_marker(const char *reason);  // the last line of every run: why the process is about to end (ok, dlopen, symbols, init, model)
-double now_ms(void);
 int out_of_time(double started_ms);   // true once the --budget-ms of the scenario is used up
 void begin(const char *step);
 void done(const char *step, int status, const char *str, const char *extra);
-void thread_names(char *buf, size_t size);
-long rss_bytes(void);
-int thread_count(void);
 void settle(int baseline, int ms);
 int load_library(void);
 Tensors *make_input(void);

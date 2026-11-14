@@ -46,12 +46,6 @@ void end_marker(const char *reason) {
   fflush(out);
 }
 
-double now_ms(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static double process_start_ms = -1;
 int out_of_time(double started_ms) {
   (void)started_ms;
@@ -80,67 +74,25 @@ void done(const char *step, int status, const char *str, const char *extra) {
   fflush(out);
 }
 
-// Thread names (/proc/self/task/*/comm) as a JSON array.
-void thread_names(char *buf, size_t size) {
-  size_t n = 0;
-  n += snprintf(buf + n, size - n, "[");
-  DIR *dir = opendir("/proc/self/task");
-  struct dirent *e;
-  int first = 1;
-  while (dir && (e = readdir(dir)) && n + 140 < size) {
-    if (e->d_name[0] == '.') continue;
-    char path[320], name[64] = "?";
-    snprintf(path, sizeof path, "/proc/self/task/%s/comm", e->d_name);
-    FILE *f = fopen(path, "r");
-    if (f) {
-      if (fgets(name, sizeof name, f)) name[strcspn(name, "\n")] = 0;
-      fclose(f);
-    }
-    n += snprintf(buf + n, size - n, "%s\"", first ? "" : ",");
-    for (const char *p = name; *p && n + 4 < size; p++) n += snprintf(buf + n, size - n, "%02x", (unsigned char)*p);  // thread names are bytes
-    n += snprintf(buf + n, size - n, "\"");
-    first = 0;
-  }
-  if (dir) closedir(dir);
-  snprintf(buf + n, size - n, "]");
-}
-
-long rss_bytes(void) {
-  long pages = 0, resident = 0;
-  FILE *f = fopen("/proc/self/statm", "r");
-  if (!f) return -1;
-  if (fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = -1;
-  fclose(f);
-  return resident < 0 ? -1 : resident * sysconf(_SC_PAGESIZE);
-}
-
-int thread_count(void) {
-  char buf[8192];
-  thread_names(buf, sizeof buf);
-  int n = 0;
-  for (char *p = buf; *p; p++) n += *p == '"';
-  return n / 2;
-}
-
 // Poll until the process is back to `baseline` threads or `ms` have passed.
 void settle(int baseline, int ms) {
-  for (int waited = 0; waited < ms && thread_count() > baseline; waited += 100) usleep(100 * 1000);
+  for (int waited = 0; waited < ms && thread_count() > baseline; waited += 100) sleep_ms(100);
 }
 
 // ---- loading ------------------------------------------------------------------------------------------------
 
 int load_library(void) {
   begin("dlopen");
-  lib_handle = dlopen(opt.lib, RTLD_NOW | RTLD_LOCAL);
+  lib_handle = plat_dlopen(opt.lib);
   if (!lib_handle) {
-    done("dlopen", NO_STATUS, dlerror(), "\"ok\":false");
+    done("dlopen", NO_STATUS, plat_dlerror(), "\"ok\":false");
     return EXIT_DLOPEN;
   }
   done("dlopen", NO_STATUS, NULL, "\"ok\":true");
 
   char present[1024] = "", missing[1024] = "";
   for (size_t i = 0; i < NUM_SYMBOLS; i++) {
-    *SYMBOLS[i].slot = dlsym(lib_handle, SYMBOLS[i].name);
+    *SYMBOLS[i].slot = plat_dlsym(lib_handle, SYMBOLS[i].name);
     char *list = *SYMBOLS[i].slot ? present : missing;
     snprintf(list + strlen(list), 1024 - strlen(list), "%s\"%s\"", *list ? "," : "", SYMBOLS[i].name);
   }

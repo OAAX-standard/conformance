@@ -1,5 +1,4 @@
 // Model tier scenarios: they send requests, so they need -m MODEL and -i for every input of the model.
-#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
@@ -555,12 +554,12 @@ int scenario_concurrency(void) {
   if ((long)producers * per_producer > cap) per_producer = cap / producers > 1 ? (int)(cap / producers) : 1;
   int total = producers * per_producer;
   struct Producer *args = calloc(producers, sizeof *args);
-  pthread_t *threads = calloc(producers, sizeof *threads);
+  plat_thread *threads = calloc(producers, sizeof *threads);
   char *seen = calloc(total, 1);
   begin("run");
   for (int p = 0; p < producers; p++) {
     args[p] = (struct Producer){.index = p, .count = per_producer, .num_models = models};
-    pthread_create(&threads[p], NULL, produce, &args[p]);
+    plat_thread_start(&threads[p], produce, &args[p]);
   }
   int received = 0, duplicates = 0, wrong_model = 0, mismatch = 0, unknown_id = 0, stalled = 0;
   double t0 = now_ms();
@@ -582,7 +581,7 @@ int scenario_concurrency(void) {
     free_tensors(o);
   }
   int enqueue_failures = 0;
-  for (int p = 0; p < producers; p++) pthread_join(threads[p], NULL), enqueue_failures += args[p].enqueue_failures;
+  for (int p = 0; p < producers; p++) plat_thread_join(threads[p]), enqueue_failures += args[p].enqueue_failures;
   char extra[480];
   snprintf(extra, sizeof extra,
            "\"models\":%d,\"expected\":%d,\"received\":%d,\"duplicates\":%d,\"wrong_model\":%d,\"mismatch\":%d,\"unknown_id\":%d,"
@@ -630,21 +629,18 @@ static void *block_in_retrieve(void *arg) {
 int scenario_cleanup_wakeup(void) {
   start();
   int status = -1;
-  pthread_t t;
-  pthread_create(&t, NULL, block_in_retrieve, &status);
-  usleep(300 * 1000);
+  plat_thread t;
+  plat_thread_start(&t, block_in_retrieve, &status);
+  sleep_ms(300);
   do_cleanup("cleanup");
-  struct timespec deadline;
-  clock_gettime(CLOCK_REALTIME, &deadline);
-  deadline.tv_sec += 5;
-  int woke = pthread_timedjoin_np(t, NULL, &deadline) == 0;
+  int woke = plat_thread_join_timeout(t, 5000);
   char extra[64];
   snprintf(extra, sizeof extra, "\"woke\":%s,\"retrieve_status\":%d", woke ? "true" : "false", status);
   begin("wakeup");
   done("wakeup", NO_STATUS, NULL, extra);
   if (!woke) {  // the thread is stuck inside the runtime: do not wait for it again
     end_marker("ok");
-    _exit(0);
+    plat_hard_exit(0);
   }
   return 0;
 }
@@ -712,7 +708,7 @@ int scenario_model_cycles(void) {
   start();  // a runtime that cannot start or load the model at all is "blocked", not a cycle failure
   do_cleanup("cleanup_first");
   int baseline = thread_count(), failures = 0, completed = 0;
-  long rss_first = -1;
+  long long rss_first = -1;
   char first_failure[128] = "";
   for (int c = 0; c < opt.model_cycles && !failures && !out_of_time(0); c++) {
     begin("model_cycle");
@@ -735,7 +731,7 @@ int scenario_model_cycles(void) {
   settle(baseline, opt.settle_ms);
   char extra[340];
   snprintf(extra, sizeof extra,
-           "\"cycles\":%d,\"completed\":%d,\"failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%ld,\"rss_last\":%ld,\"threads_before\":%d,\"threads_after\":%d",
+           "\"cycles\":%d,\"completed\":%d,\"failures\":%d,\"first_failure\":\"%s\",\"rss_first\":%lld,\"rss_last\":%lld,\"threads_before\":%d,\"threads_after\":%d",
            opt.model_cycles, completed, failures, first_failure, rss_first, rss_bytes(), baseline, thread_count());
   done("model_cycles", NO_STATUS, NULL, extra);
   return 0;
@@ -745,7 +741,7 @@ int scenario_leak_requests(void) {
   start();
   struct Build valid = {0};
   int failures = 0, completed = 0;
-  long rss_before = 0;
+  long long rss_before = 0;
   for (int i = 0; i < 50 + opt.requests && !out_of_time(0); i++) {
     if (i == 50) rss_before = rss_bytes();  // the first requests grow caches and pools
     Tensors *t = build(i, &valid), *o = NULL;
@@ -756,7 +752,7 @@ int scenario_leak_requests(void) {
     if (i >= 50) completed++;
   }
   char extra[200];
-  snprintf(extra, sizeof extra, "\"requests\":%d,\"completed\":%d,\"failures\":%d,\"rss_before\":%ld,\"rss_after\":%ld", opt.requests, completed, failures,
+  snprintf(extra, sizeof extra, "\"requests\":%d,\"completed\":%d,\"failures\":%d,\"rss_before\":%lld,\"rss_after\":%lld", opt.requests, completed, failures,
            rss_before, rss_bytes());
   begin("leak");
   done("leak", NO_STATUS, NULL, extra);

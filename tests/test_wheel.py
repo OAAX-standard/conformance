@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import HARNESS, lib_name
 from oaax_conformance import harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,7 @@ def test_no_harness_anywhere_is_one_clear_line_and_exit_3(build_dir, tmp_path, m
     monkeypatch.setattr(harness, "packaged_harness", lambda: tmp_path / "absent")
     monkeypatch.setattr(harness, "CHECKOUT_HARNESS", tmp_path / "absent")
     monkeypatch.delenv("OAAX_HARNESS", raising=False)
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--quiet"]) == 3
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--quiet"]) == 3
     err = capsys.readouterr().err.strip()
     assert "\n" not in err and "oaax-harness" in err and "Traceback" not in err
 
@@ -95,7 +96,7 @@ def test_model_at_tiny_conv_is_the_packaged_model(build_dir, monkeypatch):
 
     seen = []
     monkeypatch.setattr(cli, "_runtime", lambda args: seen.append(args.model) or 0)
-    assert cli.main(["runtime", str(build_dir / "libmock_runtime.so"), "--model", "@tiny-conv"]) == 0
+    assert cli.main(["runtime", str(build_dir / lib_name("mock_runtime")), "--model", "@tiny-conv"]) == 0
     assert seen == [toolchain.default_model()] and Path(seen[0]).is_file()
 
 
