@@ -31,3 +31,4 @@ if ($RuntimeDll) {
   $version = "$version; runtime tier: $summary"
 }
 Write-Host "smoke test OK: $version"
+exit 0  # the runtime run above exits 1 on purpose: do not let its code leak out of the script
